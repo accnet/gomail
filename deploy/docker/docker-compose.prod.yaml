@@ -1,0 +1,48 @@
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      target: api
+    env_file: ../../.env
+    depends_on:
+      - postgres
+      - redis
+    ports:
+      - "8080:8080"
+    volumes:
+      - gomail_data:/app/data
+
+  smtp:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      target: smtp
+    env_file: ../../.env
+    depends_on:
+      - postgres
+      - redis
+    ports:
+      - "25:25"
+    volumes:
+      - gomail_data:/app/data
+
+  postgres:
+    image: postgres:16-alpine
+    env_file: ../../.env
+    environment:
+      POSTGRES_DB: gomail
+      POSTGRES_USER: gomail
+      POSTGRES_PASSWORD: gomail_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+
+volumes:
+  postgres_data:
+  redis_data:
+  gomail_data:

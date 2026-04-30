@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GoMail — Sign In</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <script>
+      (function() {
+        const theme = localStorage.getItem("theme") || "light";
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
+    <link rel="stylesheet" href="/app/styles.css" />
+  </head>
+  <body>
+    <div id="app-root">
+      <div class="login-container">
+        <div class="login-brand">
+          <div class="login-logo">
+            <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
+              <rect width="40" height="40" rx="10" fill="var(--color-primary)"/>
+              <path d="M10 14L20 22L30 14" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+              <rect x="8" y="12" width="24" height="16" rx="3" stroke="white" stroke-width="2"/>
+            </svg>
+          </div>
+          <h1>GoMail</h1>
+          <p class="login-subtitle">Self-hosted inbound mail platform</p>
+        </div>
+        <div class="login-card">
+          <!-- Tab Switcher -->
+          <div class="login-tabs">
+            <button id="tab-signin" class="login-tab active">Sign In</button>
+            <button id="tab-signup" class="login-tab">Sign Up</button>
+          </div>
+
+          <!-- Sign In Form -->
+          <form id="login-form" class="login-form">
+            <div class="field">
+              <label for="login-email">Email</label>
+              <input id="login-email" type="email" placeholder="admin@example.com" required autocomplete="email" />
+            </div>
+            <div class="field">
+              <label for="login-password">Password</label>
+              <input id="login-password" type="password" placeholder="Enter your password" required autocomplete="current-password" />
+            </div>
+            <button type="submit" class="btn btn-primary btn-full">Sign in</button>
+            <p id="login-error" class="form-error hidden"></p>
+          </form>
+
+          <!-- Sign Up Form -->
+          <form id="register-form" class="login-form hidden">
+            <div class="field">
+              <label for="register-name">Name</label>
+              <input id="register-name" type="text" placeholder="Your name" />
+            </div>
+            <div class="field">
+              <label for="register-email">Email</label>
+              <input id="register-email" type="email" placeholder="you@example.com" required />
+            </div>
+            <div class="field">
+              <label for="register-password">Password</label>
+              <input id="register-password" type="password" placeholder="At least 8 characters" required minlength="8" />
+            </div>
+            <button type="submit" class="btn btn-primary btn-full">Create Account</button>
+            <p id="register-error" class="form-error hidden"></p>
+            <p id="register-success" class="form-success hidden"></p>
+          </form>
+        </div>
+      </div>
+    </div>
+    <script src="/app/login.js"></script>
+  </body>
+</html>
