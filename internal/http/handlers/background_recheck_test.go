@@ -25,6 +25,10 @@ func (m mxResolverStub) LookupMX(_ context.Context, name string) ([]*net.MX, err
 	return m.records[name], nil
 }
 
+func (m mxResolverStub) LookupTXT(_ context.Context, name string) ([]string, error) {
+	return nil, nil
+}
+
 func TestRecheckDomainsOnceUpdatesStatuses(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
 	if err != nil {

@@ -29,11 +29,14 @@ import (
 )
 
 type App struct {
-	DB       *gorm.DB
-	Auth     *auth.Service
-	Config   config.Config
-	Redis    *redis.Client
-	Verifier dns.Verifier
+	DB             *gorm.DB
+	Auth           *auth.Service
+	Config         config.Config
+	Redis          *redis.Client
+	Verifier       dns.Verifier
+	StaticProjects *StaticProjectsHandler
+	SendEmail      func(to, from, subject, body string) error
+	RateLimiter    *mw.RateLimiter
 }
 
 func (a App) Router() *gin.Engine {
@@ -42,22 +45,35 @@ func (a App) Router() *gin.Engine {
 	r.GET("/healthz", func(c *gin.Context) { response.OK(c, gin.H{"ok": true}) })
 	r.GET("/", func(c *gin.Context) { c.Redirect(http.StatusFound, "/app/") })
 	r.Static("/app", "./web")
+	if a.StaticProjects != nil {
+		r.GET("/static-thumbnails/:id/thumbnail.png", a.StaticProjects.Thumbnail)
+	}
 
 	api := r.Group("/api")
-	api.POST("/auth/register", a.register)
-	api.POST("/auth/login", a.login)
+
+	// Apply rate limiter to public auth endpoints if configured
+	authPublic := api.Group("")
+	if a.RateLimiter != nil {
+		authPublic.Use(a.RateLimiter.RateLimit())
+	}
+	authPublic.POST("/auth/register", a.register)
+	authPublic.POST("/auth/login", a.login)
 	api.POST("/auth/refresh", a.refresh)
 
 	protected := api.Group("")
 	protected.Use(mw.Auth(a.Auth, a.DB))
+	protected.GET("/me", a.me)
 	protected.POST("/auth/logout", a.logout)
 	protected.POST("/auth/change-password", a.changePassword)
-	protected.GET("/me", func(c *gin.Context) { response.OK(c, mw.CurrentUser(c)) })
 	protected.GET("/domains", a.listDomains)
 	protected.POST("/domains", a.createDomain)
 	protected.GET("/domains/:id", a.getDomain)
 	protected.POST("/domains/:id/verify", a.verifyDomain)
+	protected.GET("/domains/:id/email-auth", a.getDomainEmailAuth)
+	protected.POST("/domains/:id/email-auth/dkim/generate", a.generateDomainDKIM)
+	protected.POST("/domains/:id/email-auth/verify", a.verifyDomainEmailAuth)
 	protected.DELETE("/domains/:id", a.deleteDomain)
+
 	protected.GET("/inboxes", a.listInboxes)
 	protected.POST("/inboxes", a.createInbox)
 	protected.PATCH("/inboxes/:id", a.patchInbox)
@@ -68,7 +84,15 @@ func (a App) Router() *gin.Engine {
 	protected.DELETE("/emails/:id", a.deleteEmail)
 	protected.GET("/emails/:id/attachments/:attachmentId/download", a.downloadAttachment)
 	protected.GET("/dashboard", a.dashboard)
-	protected.GET("/events/stream", a.events)
+
+	// API key management (SMTP relay / submission)
+	RegisterApiKeyRoutes(protected, a.DB, mw.Auth(a.Auth, a.DB), a.Config.SMTPAuthHostname, a.Config.SMTPAuthPort, a.Config.SMTPAuthTLSPort)
+	// Test send endpoint (requires API key auth, not session)
+	apiKeyGroup := api.Group("")
+	apiKeyGroup.Use(mw.ApiKeyAuth(a.DB))
+	RegisterTestSendRoute(apiKeyGroup, a.DB, mw.ApiKeyAuth(a.DB), a.SendEmail)
+
+	api.GET("/events/stream", mw.AuthWithQueryToken(a.Auth, a.DB), a.events)
 
 	admin := protected.Group("/admin")
 	admin.Use(mw.Admin())
@@ -77,6 +101,9 @@ func (a App) Router() *gin.Engine {
 	admin.PATCH("/users/:id/quotas", mw.SuperAdmin(), a.adminUserQuotas)
 	admin.DELETE("/users/:id", mw.SuperAdmin(), a.adminDeleteUser)
 	admin.PATCH("/attachments/:id/override", a.adminAttachmentOverride)
+	if a.StaticProjects != nil {
+		WireStaticProjectRoutes(protected, a.StaticProjects)
+	}
 	return r
 }
 
@@ -146,6 +173,10 @@ func (a App) login(c *gin.Context) {
 		return
 	}
 	response.OK(c, gin.H{"access_token": access, "refresh_token": refresh, "user": user})
+}
+
+func (a App) me(c *gin.Context) {
+	response.OK(c, mw.CurrentUser(c))
 }
 
 func (a App) refresh(c *gin.Context) {
@@ -523,6 +554,7 @@ func (a App) adminUserQuotas(c *gin.Context) {
 		MaxAttachmentSizeMB *int   `json:"max_attachment_size_mb"`
 		MaxMessageSizeMB    *int   `json:"max_message_size_mb"`
 		MaxStorageBytes     *int64 `json:"max_storage_bytes"`
+		MaxWebsites         *int   `json:"max_websites"`
 	}
 	if !bind(c, &req) {
 		return
@@ -562,6 +594,13 @@ func (a App) adminUserQuotas(c *gin.Context) {
 			return
 		}
 		updates["max_storage_bytes"] = *req.MaxStorageBytes
+	}
+	if req.MaxWebsites != nil {
+		if *req.MaxWebsites < 0 {
+			response.Error(c, http.StatusBadRequest, "invalid_quota", "max_websites must be >= 0")
+			return
+		}
+		updates["max_websites"] = *req.MaxWebsites
 	}
 	if len(updates) == 0 {
 		response.Error(c, http.StatusBadRequest, "invalid_quota", "no quota fields provided")

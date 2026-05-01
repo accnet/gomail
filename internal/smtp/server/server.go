@@ -89,10 +89,13 @@ func (s *Session) Data(r io.Reader) error {
 	if int64(len(raw)) >= limit {
 		return &smtp.SMTPError{Code: 552, Message: "message size limit exceeded"}
 	}
+	// Normalize line endings before parsing
+	normalized := NormalizeMessage(raw)
 	// Deliver to each recipient
 	var lastErr error
 	for _, rcpt := range s.rcpts {
-		_, err = s.backend.Pipeline.Ingest(context.Background(), rcpt.inbox, rcpt.user, s.from, rcpt.address, raw)
+		_, err = s.backend.Pipeline.Ingest(context.Background(), rcpt.inbox, rcpt.user, s.from, rcpt.address, normalized)
+
 		if err != nil {
 			lastErr = err
 			s.backend.Logger.Error("smtp ingest failed for recipient", "error", err, "remote", s.remote, "recipient", rcpt.address)

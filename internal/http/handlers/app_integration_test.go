@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,11 +35,12 @@ func testDB(t *testing.T) *gorm.DB {
 
 func testConfig() config.Config {
 	return config.Config{
-		AppEnv:          "test",
-		JWTSecret:       "test-secret-123456789",
-		AccessTokenTTL:  time.Hour,
-		RefreshTokenTTL: 24 * time.Hour,
-		MXTarget:        "mx.test.local",
+		AppEnv:                  "test",
+		JWTSecret:               "test-secret-123456789",
+		AccessTokenTTL:          time.Hour,
+		RefreshTokenTTL:         24 * time.Hour,
+		MXTarget:                "mx.test.local",
+		DKIMKeyEncryptionSecret: "test-dkim-encryption-secret-32-bytes",
 	}
 }
 
@@ -117,33 +119,93 @@ func doJSON(t *testing.T, router http.Handler, method, path string, body any, to
 	return w
 }
 
+func TestLoginBootstrapProfileFlow(t *testing.T) {
+	app, database := newTestApp(t)
+	router := app.Router()
+
+	user := createUser(t, database, "user@test.local", true, false, false)
+
+	loginResp := doJSON(t, router, http.MethodPost, "/api/auth/login", map[string]any{
+		"email":    user.Email,
+		"password": "password123",
+	}, "")
+	if loginResp.Code != http.StatusOK {
+		t.Fatalf("login status = %d body=%s", loginResp.Code, loginResp.Body.String())
+	}
+
+	var loginBody struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.Unmarshal(loginResp.Body.Bytes(), &loginBody); err != nil {
+		t.Fatal(err)
+	}
+	if loginBody.AccessToken == "" {
+		t.Fatal("expected access token in login response")
+	}
+
+	meResp := doJSON(t, router, http.MethodGet, "/api/me", nil, loginBody.AccessToken)
+	if meResp.Code != http.StatusOK {
+		t.Fatalf("me status = %d body=%s", meResp.Code, meResp.Body.String())
+	}
+
+	var meBody db.User
+	if err := json.Unmarshal(meResp.Body.Bytes(), &meBody); err != nil {
+		t.Fatal(err)
+	}
+	if meBody.ID != user.ID {
+		t.Fatalf("me user id = %s want %s", meBody.ID, user.ID)
+	}
+	if meBody.Email != user.Email {
+		t.Fatalf("me email = %s want %s", meBody.Email, user.Email)
+	}
+}
+
+func TestEventsStreamAcceptsQueryToken(t *testing.T) {
+	app, database := newTestApp(t)
+	router := app.Router()
+
+	user := createUser(t, database, "events@test.local", true, false, false)
+	token := bearerToken(t, app, user)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/events/stream?token="+token, nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("events stream status = %d body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestAuthDomainEmailAdminFlow(t *testing.T) {
 	app, database := newTestApp(t)
 	app.Verifier = dns.Verifier{MXTarget: app.Config.MXTarget, Timeout: time.Second, Resolver: stubResolver{target: app.Config.MXTarget}}
 	router := app.Router()
 
-	super := createUser(t, database, "admin@test.local", true, true, true)
+	super := createUser(t, database, "admin-flow@test.local", true, true, true)
 	superToken := bearerToken(t, app, super)
+
+	testEmail := "pending-user@test.local"
+	testPass := "password123"
 
 	registerResp := doJSON(t, router, http.MethodPost, "/api/auth/register", map[string]any{
 		"name":     "Pending User",
-		"email":    "user@test.local",
-		"password": "password123",
+		"email":    testEmail,
+		"password": testPass,
 	}, "")
 	if registerResp.Code != http.StatusCreated {
 		t.Fatalf("register status = %d body=%s", registerResp.Code, registerResp.Body.String())
 	}
 
 	loginResp := doJSON(t, router, http.MethodPost, "/api/auth/login", map[string]any{
-		"email":    "user@test.local",
-		"password": "password123",
+		"email":    testEmail,
+		"password": testPass,
 	}, "")
 	if loginResp.Code != http.StatusForbidden {
 		t.Fatalf("inactive login status = %d body=%s", loginResp.Code, loginResp.Body.String())
 	}
 
 	var user db.User
-	if err := database.Where("email = ?", "user@test.local").First(&user).Error; err != nil {
+	if err := database.Where("email = ?", testEmail).First(&user).Error; err != nil {
 		t.Fatal(err)
 	}
 
@@ -153,8 +215,8 @@ func TestAuthDomainEmailAdminFlow(t *testing.T) {
 	}
 
 	loginResp = doJSON(t, router, http.MethodPost, "/api/auth/login", map[string]any{
-		"email":    "user@test.local",
-		"password": "password123",
+		"email":    testEmail,
+		"password": testPass,
 	}, "")
 	if loginResp.Code != http.StatusOK {
 		t.Fatalf("active login status = %d body=%s", loginResp.Code, loginResp.Body.String())
@@ -166,12 +228,12 @@ func TestAuthDomainEmailAdminFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	domainResp := doJSON(t, router, http.MethodPost, "/api/domains", map[string]any{"name": "example.test"}, loginBody.AccessToken)
+	domainResp := doJSON(t, router, http.MethodPost, "/api/domains", map[string]any{"name": "flow-example.test"}, loginBody.AccessToken)
 	if domainResp.Code != http.StatusCreated {
 		t.Fatalf("create domain = %d body=%s", domainResp.Code, domainResp.Body.String())
 	}
 	var domain db.Domain
-	if err := database.Where("name = ?", "example.test").First(&domain).Error; err != nil {
+	if err := database.Where("name = ?", "flow-example.test").First(&domain).Error; err != nil {
 		t.Fatal(err)
 	}
 
@@ -188,7 +250,7 @@ func TestAuthDomainEmailAdminFlow(t *testing.T) {
 		t.Fatalf("create inbox = %d body=%s", inboxResp.Code, inboxResp.Body.String())
 	}
 	var inbox db.Inbox
-	if err := database.Where("address = ?", "hello@example.test").First(&inbox).Error; err != nil {
+	if err := database.Where("address = ?", "hello@flow-example.test").First(&inbox).Error; err != nil {
 		t.Fatal(err)
 	}
 
@@ -257,10 +319,67 @@ func TestAuthDomainEmailAdminFlow(t *testing.T) {
 	}
 }
 
+func TestDomainEmailAuthGenerateDKIM(t *testing.T) {
+	app, database := newTestApp(t)
+	app.Config.SMTPRelayPublicIP = "203.0.113.10"
+	router := app.Router()
+
+	user := createUser(t, database, "auth-domain@test.local", true, false, false)
+	token := bearerToken(t, app, user)
+	domain := db.Domain{
+		UserID:             user.ID,
+		Name:               "auth-example.test",
+		Status:             db.DomainStatusVerified,
+		VerificationMethod: "mx",
+		MXTarget:           app.Config.MXTarget,
+	}
+	if err := database.Create(&domain).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	getResp := doJSON(t, router, http.MethodGet, "/api/domains/"+domain.ID.String()+"/email-auth", nil, token)
+	if getResp.Code != http.StatusOK {
+		t.Fatalf("get email auth status = %d body=%s", getResp.Code, getResp.Body.String())
+	}
+	if !bytes.Contains(getResp.Body.Bytes(), []byte("v=spf1 ip4:203.0.113.10 mx -all")) {
+		t.Fatalf("expected SPF instruction, body=%s", getResp.Body.String())
+	}
+
+	genResp := doJSON(t, router, http.MethodPost, "/api/domains/"+domain.ID.String()+"/email-auth/dkim/generate", map[string]string{
+		"selector": "gomail1",
+	}, token)
+	if genResp.Code != http.StatusOK {
+		t.Fatalf("generate dkim status = %d body=%s", genResp.Code, genResp.Body.String())
+	}
+	if bytes.Contains(genResp.Body.Bytes(), []byte("PRIVATE KEY")) {
+		t.Fatal("private DKIM key leaked in response")
+	}
+	if !bytes.Contains(genResp.Body.Bytes(), []byte("gomail1._domainkey.auth-example.test")) {
+		t.Fatalf("expected DKIM record name, body=%s", genResp.Body.String())
+	}
+	if !bytes.Contains(genResp.Body.Bytes(), []byte("v=DKIM1; k=rsa; p=")) {
+		t.Fatalf("expected DKIM record value, body=%s", genResp.Body.String())
+	}
+	var authRow db.DomainEmailAuth
+	if err := database.First(&authRow, "domain_id = ?", domain.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(authRow.DKIMPrivateKeyPEM, "enc:v1:") {
+		t.Fatalf("expected encrypted private key, got %q", authRow.DKIMPrivateKeyPEM[:min(len(authRow.DKIMPrivateKeyPEM), 16)])
+	}
+	if strings.Contains(authRow.DKIMPrivateKeyPEM, "PRIVATE KEY") {
+		t.Fatal("stored DKIM key contains plaintext private key")
+	}
+}
+
 type stubResolver struct {
 	target string
 }
 
 func (s stubResolver) LookupMX(_ context.Context, _ string) ([]*net.MX, error) {
 	return []*net.MX{{Host: s.target + ".", Pref: 10}}, nil
+}
+
+func (s stubResolver) LookupTXT(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
 }

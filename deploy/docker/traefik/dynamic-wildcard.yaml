@@ -1,0 +1,23 @@
+# Wildcard router for static website subdomains -> static-server.
+# The static-server resolves the original Host header against static_projects.
+http:
+  routers:
+    static-wildcard:
+      rule: "HostRegexp(`{subdomain:[a-z0-9-]+}.{base_domain:.+}`)"
+      entryPoints:
+        - web
+      service: static-server
+
+    static-wildcard-secure:
+      rule: "HostRegexp(`{subdomain:[a-z0-9-]+}.{base_domain:.+}`)"
+      entryPoints:
+        - websecure
+      service: static-server
+      tls:
+        certResolver: letsencrypt
+
+  services:
+    static-server:
+      loadBalancer:
+        servers:
+          - url: "http://static-server:8090"

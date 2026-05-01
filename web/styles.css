@@ -786,6 +786,15 @@ tbody tr:hover {
   background: var(--color-surface-hover);
 }
 
+.inline-code {
+  display: inline-block;
+  padding: 3px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+  font-size: 12px;
+}
+
 /* --- Badges --- */
 .badge {
   display: inline-flex;
@@ -1279,6 +1288,65 @@ tbody tr:hover {
   cursor: not-allowed;
 }
 
+.smtp-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.smtp-setting {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.smtp-setting-label,
+.smtp-setting-note {
+  display: block;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.smtp-setting-value {
+  display: block;
+  margin-top: 4px;
+  color: var(--color-text);
+  font-size: 13px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.smtp-setting-note {
+  margin-top: 4px;
+}
+
+.api-key-reveal-note {
+  margin-bottom: 12px;
+  color: var(--color-warning);
+  font-size: 13px;
+}
+
+.copy-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.copy-field code {
+  display: block;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-hover);
+  font-size: 13px;
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
 .domain-dropdown {
   position: relative;
 }
@@ -1543,6 +1611,10 @@ tbody tr:hover {
   .grid-2-narrow {
     grid-template-columns: 1fr;
   }
+
+  .smtp-settings-grid {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 @media (max-width: 768px) {
@@ -1586,4 +1658,145 @@ tbody tr:hover {
   .stats-4 {
     grid-template-columns: 1fr 1fr;
   }
+
+  .websites-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .smtp-settings-grid,
+  .copy-field {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ============================================
+   Websites
+   ============================================ */
+
+.websites-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+.website-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  transition: box-shadow 0.15s;
+}
+
+.website-card:hover {
+  box-shadow: 0 2px 8px var(--color-shadow-lg);
+}
+
+.website-card-thumb {
+  width: 100%;
+  height: 140px;
+  overflow: hidden;
+  background: var(--color-surface-hover);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.website-card-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.website-card-placeholder {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-md);
+  background: var(--color-primary-light);
+  color: var(--color-primary);
+  font-size: 18px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.website-card-body {
+  padding: 14px 16px;
+}
+
+.website-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.website-card-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin: 0;
+}
+
+.website-card-url {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  margin: 2px 0;
+}
+
+.website-card-meta {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  margin: 2px 0 0;
+}
+
+.website-card-error {
+  font-size: 12px;
+  color: var(--color-danger);
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  background: var(--color-danger-light);
+  border-radius: var(--radius-sm);
+}
+
+.website-card-actions {
+  display: flex;
+  gap: 6px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--color-border);
+}
+
+/* Website Settings Tabs */
+.website-tab {
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.website-tab:hover {
+  color: var(--color-text);
+}
+
+.website-tab.active {
+  color: var(--color-primary);
+  border-bottom-color: var(--color-primary);
+}
+
+/* Spin animation for deploy spinner */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.spin {
+  animation: spin 0.8s linear infinite;
 }

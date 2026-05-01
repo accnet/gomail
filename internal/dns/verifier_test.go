@@ -12,6 +12,20 @@ func (f fakeResolver) LookupMX(ctx context.Context, name string) ([]*net.MX, err
 	return []*net.MX(f), nil
 }
 
+func (f fakeResolver) LookupTXT(ctx context.Context, name string) ([]string, error) {
+	return nil, nil
+}
+
+type fakeTXTResolver []string
+
+func (f fakeTXTResolver) LookupMX(ctx context.Context, name string) ([]*net.MX, error) {
+	return nil, nil
+}
+
+func (f fakeTXTResolver) LookupTXT(ctx context.Context, name string) ([]string, error) {
+	return []string(f), nil
+}
+
 func TestVerifierRequiresExpectedMXTarget(t *testing.T) {
 	v := Verifier{Resolver: fakeResolver{{Host: "mx.example.com."}}, MXTarget: "mx.example.com"}
 	ok, msg := v.Verify(context.Background(), "user.test")
@@ -25,5 +39,29 @@ func TestVerifierRejectsWrongMXTarget(t *testing.T) {
 	ok, _ := v.Verify(context.Background(), "user.test")
 	if ok {
 		t.Fatal("expected verify failure")
+	}
+}
+
+func TestVerifierChecksSPFRequiredMechanism(t *testing.T) {
+	v := Verifier{Resolver: fakeTXTResolver{`v=spf1 ip4:203.0.113.10 mx -all`}}
+	ok, msg := v.VerifySPF(context.Background(), "example.com", "ip4:203.0.113.10")
+	if !ok || msg != "" {
+		t.Fatalf("expected SPF verify ok, got ok=%v msg=%q", ok, msg)
+	}
+}
+
+func TestVerifierRejectsMultipleSPFRecords(t *testing.T) {
+	v := Verifier{Resolver: fakeTXTResolver{`v=spf1 mx -all`, `v=spf1 ip4:203.0.113.10 -all`}}
+	ok, _ := v.VerifySPF(context.Background(), "example.com", "ip4:203.0.113.10")
+	if ok {
+		t.Fatal("expected SPF verify failure")
+	}
+}
+
+func TestVerifierChecksDKIMPublicKey(t *testing.T) {
+	v := Verifier{Resolver: fakeTXTResolver{`v=DKIM1; k=rsa; p=abc123`}}
+	ok, msg := v.VerifyDKIM(context.Background(), "gomail._domainkey.example.com", "abc123")
+	if !ok || msg != "" {
+		t.Fatalf("expected DKIM verify ok, got ok=%v msg=%q", ok, msg)
 	}
 }

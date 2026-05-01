@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
 type Config struct {
@@ -42,10 +44,12 @@ type Config struct {
 	DefaultAdminMaxMessageSizeMB    int
 	DefaultAdminMaxAttachmentSizeMB int
 	DefaultAdminMaxStorageGB        int
+	DefaultAdminMaxWebsites         int
 
 	StorageRoot           string
 	AttachmentStorageRoot string
 	RawEmailStorageRoot   string
+	StaticSitesRoot       string
 
 	DomainVerifyTimeout time.Duration
 	DomainRecheckEvery  time.Duration
@@ -56,17 +60,54 @@ type Config struct {
 	ClamAVAddr          string
 	TrustedProxies      []string
 	SeedDemoData        bool
+
+	StaticSitesMaxArchiveBytes   int64
+	StaticSitesMaxExtractedBytes int64
+	StaticSitesMaxFileCount      int
+	StaticSitesBaseDomain        string
+	StaticServerAddr             string
+	TraefikDynamicConfDir        string
+	TraefikPublicIP              string
+
+	// SMTP relay / submission server
+	SMTPAuthEnabled         bool
+	SMTPAuthHostname        string
+	SMTPAuthPort            string
+	SMTPAuthTLSPort         string
+	SMTPAuthTLSMode         string // "starttls", "tls", or "none"
+	SMTPAuthCertFile        string
+	SMTPAuthKeyFile         string
+	SMTPRelayHostname       string
+	SMTPRelayPublicIP       string
+	DKIMEnabled             bool
+	DKIMSelector            string
+	DKIMPrivateKeyPath      string
+	DKIMKeyEncryptionSecret string
+	OutboundMode            string // "direct" or "relay"
+	OutboundRelayHost       string
+	OutboundRelayPort       string
+	OutboundRelayUser       string
+	OutboundRelayPass       string
+	MaxDailySendPerKey      int
 }
 
 func Load() (Config, error) {
+	if os.Getenv("APP_ENV") == "" {
+		if _, err := os.Stat(".env.dev"); err == nil {
+			_ = godotenv.Load(".env.dev")
+		} else {
+			_ = godotenv.Load(".env")
+		}
+	}
+
 	cfg := Config{
 		AppEnv:                          env("APP_ENV", "development"),
 		AppName:                         env("APP_NAME", "GoMail"),
-		AppBaseURL:                      env("APP_BASE_URL", "http://localhost:8089"),
-		APIBaseURL:                      env("API_BASE_URL", "http://localhost:8089/api"),
+		AppBaseURL:                      env("APP_BASE_URL", "http://localhost:8080"),
+		APIBaseURL:                      env("API_BASE_URL", "http://localhost:8080/api"),
 		SaaSDomain:                      env("SAAS_DOMAIN", "localhost"),
 		HTTPHost:                        env("HTTP_HOST", "0.0.0.0"),
-		HTTPPort:                        env("HTTP_PORT", "8089"),
+		HTTPPort:                        env("HTTP_PORT", "8080"),
 		SMTPHost:                        env("SMTP_HOST", "0.0.0.0"),
 		SMTPPort:                        env("SMTP_PORT", "2525"),
 		SMTPHostname:                    env("SMTP_HOSTNAME", "mx.localhost"),
@@ -86,9 +127,11 @@ func Load() (Config, error) {
 		DefaultAdminMaxMessageSizeMB:    envInt("DEFAULT_ADMIN_MAX_MESSAGE_SIZE_MB", 25),
 		DefaultAdminMaxAttachmentSizeMB: envInt("DEFAULT_ADMIN_MAX_ATTACHMENT_SIZE_MB", 25),
 		DefaultAdminMaxStorageGB:        envInt("DEFAULT_ADMIN_MAX_STORAGE_GB", 100),
+		DefaultAdminMaxWebsites:         envInt("DEFAULT_ADMIN_MAX_WEBSITES", 100),
 		StorageRoot:                     env("STORAGE_ROOT", "./data"),
 		AttachmentStorageRoot:           env("ATTACHMENT_STORAGE_ROOT", "./data/attachments"),
 		RawEmailStorageRoot:             env("RAW_EMAIL_STORAGE_ROOT", "./data/raw-eml"),
+		StaticSitesRoot:                 env("STATIC_SITES_ROOT", "./data/static-sites"),
 		DomainVerifyTimeout:             time.Duration(envInt("DOMAIN_VERIFY_TIMEOUT_SECONDS", 10)) * time.Second,
 		DomainRecheckEvery:              time.Duration(envInt("DOMAIN_RECHECK_INTERVAL_MINUTES", 30)) * time.Minute,
 		BlockFlagged:                    envBool("BLOCK_FLAGGED_ATTACHMENTS", true),
@@ -97,6 +140,34 @@ func Load() (Config, error) {
 		ClamAVEnabled:                   envBool("CLAMAV_ENABLED", false),
 		ClamAVAddr:                      env("CLAMAV_ADDR", "clamav:3310"),
 		SeedDemoData:                    envBool("SEED_DEMO_DATA", true),
+		StaticSitesMaxArchiveBytes:      envInt64("STATIC_SITES_MAX_ARCHIVE_BYTES", int64(envInt("STATIC_SITES_MAX_ARCHIVE_MB", 50))*1024*1024),
+		StaticSitesMaxExtractedBytes:    envInt64("STATIC_SITES_MAX_EXTRACTED_BYTES", int64(envInt("STATIC_SITES_MAX_EXTRACTED_MB", 200))*1024*1024),
+		StaticSitesMaxFileCount:         envInt("STATIC_SITES_MAX_FILE_COUNT", 5000),
+		StaticSitesBaseDomain:           env("STATIC_SITES_BASE_DOMAIN", "localhost"),
+		StaticServerAddr:                env("STATIC_SERVER_ADDR", ":8090"),
+		TraefikDynamicConfDir:           env("TRAEFIK_DYNAMIC_CONF_DIR", "./data/traefik-dynamic"),
+		TraefikPublicIP:                 env("TRAEFIK_PUBLIC_IP", ""),
+
+		// SMTP relay defaults
+		SMTPAuthEnabled:         envBool("SMTP_AUTH_ENABLED", false),
+		SMTPAuthHostname:        env("SMTP_AUTH_HOSTNAME", "smtp.localhost"),
+		SMTPAuthPort:            env("SMTP_AUTH_PORT", "587"),
+		SMTPAuthTLSPort:         env("SMTP_AUTH_TLS_PORT", "465"),
+		SMTPAuthTLSMode:         env("SMTP_AUTH_TLS_MODE", "starttls"),
+		SMTPAuthCertFile:        env("SMTP_AUTH_CERT_FILE", ""),
+		SMTPAuthKeyFile:         env("SMTP_AUTH_KEY_FILE", ""),
+		SMTPRelayHostname:       env("SMTP_RELAY_HOSTNAME", ""),
+		SMTPRelayPublicIP:       env("SMTP_RELAY_PUBLIC_IP", ""),
+		DKIMEnabled:             envBool("DKIM_ENABLED", false),
+		DKIMSelector:            env("DKIM_SELECTOR", "gomail"),
+		DKIMPrivateKeyPath:      env("DKIM_PRIVATE_KEY_PATH", ""),
+		DKIMKeyEncryptionSecret: env("DKIM_KEY_ENCRYPTION_SECRET", ""),
+		OutboundMode:            env("OUTBOUND_MODE", "direct"),
+		OutboundRelayHost:       env("OUTBOUND_RELAY_HOST", ""),
+		OutboundRelayPort:       env("OUTBOUND_RELAY_PORT", "25"),
+		OutboundRelayUser:       env("OUTBOUND_RELAY_USER", ""),
+		OutboundRelayPass:       env("OUTBOUND_RELAY_PASS", ""),
+		MaxDailySendPerKey:      envInt("MAX_DAILY_SEND_PER_KEY", 0),
 	}
 	if proxies := strings.TrimSpace(os.Getenv("TRUSTED_PROXIES")); proxies != "" {
 		cfg.TrustedProxies = strings.Split(proxies, ",")
@@ -138,6 +209,9 @@ func (c Config) Validate() error {
 		if c.DefaultAdminPassword == "change-me-before-deploy" || len(c.DefaultAdminPassword) < 12 {
 			return errors.New("DEFAULT_ADMIN_PASSWORD must be changed and at least 12 characters for production")
 		}
+		if c.DKIMEnabled && (len(c.DKIMKeyEncryptionSecret) < 32 || c.DKIMKeyEncryptionSecret == "change-me-use-at-least-32-random-chars") {
+			return errors.New("DKIM_KEY_ENCRYPTION_SECRET must be set to at least 32 characters when DKIM is enabled in production")
+		}
 	}
 	return nil
 }
@@ -155,6 +229,18 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	n, err := strconv.Atoi(v)
+	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+func envInt64(key string, fallback int64) int64 {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
 	if err != nil {
 		return fallback
 	}

@@ -1,3 +1,5 @@
+
+
 /* ============================================
    GoMail — Main Application
    ============================================ */
@@ -7,6 +9,9 @@ let refreshToken = localStorage.getItem("refresh_token") || "";
 let currentView = "dashboard";
 let currentUser = null;
 let eventSource = null;
+let eventReconnectTimer = null;
+let shouldReconnectEvents = true;
+let eventReconnectAttempts = 0;
 
 const state = {
   domains: [],
@@ -18,7 +23,11 @@ const state = {
   selectedEmailID: null,
   selectedInboxID: null,
   emailUnreadOnly: false,
-  emailPage: 1
+  emailPage: 1,
+  websites: [],
+  websiteQuota: null,
+  apiKeys: [],
+  smtpSettings: null
 };
 
 // --- DOM References ---
@@ -52,6 +61,8 @@ const viewMeta = {
   dashboard: { section: "Overview", title: "Dashboard" },
   email: { section: "Messaging", title: "Email" },
   domains: { section: "Infrastructure", title: "Domains" },
+  websites: { section: "Hosting", title: "Websites" },
+  "api-keys": { section: "Relay", title: "API Keys" },
   users: { section: "Admin", title: "Users" },
   settings: { section: "Account", title: "Settings" }
 };
@@ -61,13 +72,17 @@ const defaultView = "dashboard";
 // --- API Helper ---
 const api = async (path, options = {}) => {
   const { refresh, ...fetchOptions } = options;
+  const headers = {
+    "Content-Type": "application/json",
+    ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+    ...(fetchOptions.headers || {})
+  };
+  if (fetchOptions.body instanceof FormData) {
+    delete headers["Content-Type"];
+  }
   const res = await fetch(`/api${path}`, {
     ...fetchOptions,
-    headers: {
-      "Content-Type": "application/json",
-      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
-      ...(fetchOptions.headers || {})
-    }
+    headers
   });
   if (res.status === 401 && refresh !== false && refreshToken) {
     const refreshed = await refreshSession();
@@ -101,8 +116,7 @@ async function refreshSession() {
     refreshToken = data.refresh_token;
     localStorage.setItem("access_token", accessToken);
     localStorage.setItem("refresh_token", refreshToken);
-    eventSource?.close();
-    eventSource = null;
+    disconnectEvents({ reconnect: false });
     connectEvents();
     return true;
   } catch (_) {
@@ -126,18 +140,24 @@ function toggleTheme() {
 // --- Navigation ---
 function setView(view) {
   currentView = view;
-  const meta = viewMeta[view];
-  els.breadcrumbSection.textContent = meta.section;
-  els.breadcrumbTitle.textContent = meta.title;
+  const base = view.split("/")[0];
+  const meta = viewMeta[base] || viewMeta[view];
+  if (meta) {
+    els.breadcrumbSection.textContent = meta.section;
+    els.breadcrumbTitle.textContent = meta.title;
+  } else {
+    els.breadcrumbSection.textContent = "";
+    els.breadcrumbTitle.textContent = view;
+  }
   document.querySelectorAll(".nav-item").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.view === view);
+    btn.classList.toggle("active", btn.dataset.view === base);
   });
-  // Close mobile sidebar
   els.sidebar.classList.remove("open");
 }
 
 function normalizeView(view) {
-  return viewMeta[view] ? view : defaultView;
+  const base = view.split("/")[0];
+  return viewMeta[base] ? view : (viewMeta[view] ? view : defaultView);
 }
 
 function viewFromURL() {
@@ -146,7 +166,8 @@ function viewFromURL() {
 }
 
 function setViewURL(view, replace = false) {
-  const nextHash = `#/${normalizeView(view)}`;
+  const base = view.split("/")[0];
+  const nextHash = `#/${viewMeta[base] ? view : base}`;
   if (window.location.hash === nextHash) return false;
   if (replace) {
     history.replaceState(null, "", nextHash);
@@ -158,16 +179,24 @@ function setViewURL(view, replace = false) {
 
 async function renderView(view, options = {}) {
   const nextView = normalizeView(view);
+  const base = nextView.split("/")[0];
   if (options.updateURL !== false) {
     const changed = setViewURL(nextView, options.replaceURL);
     if (changed && !options.replaceURL) return;
   }
-  if (nextView === "dashboard") await renderDashboard();
-  else if (nextView === "domains") await renderDomains();
-  else if (nextView === "email") await renderEmail();
-  else if (nextView === "users") await renderUsers();
-  else if (nextView === "settings") renderSettings();
+  if (base === "dashboard") await renderDashboard();
+  else if (base === "domains") await renderDomains();
+  else if (base === "email") await renderEmail();
+  else if (base === "websites") {
+    const id = nextView.split("/")[1];
+    if (id) await renderWebsiteSettings(id);
+    else await renderWebsites();
+  }
+  else if (base === "api-keys") await renderApiKeys();
+  else if (base === "users") await renderUsers();
+  else if (base === "settings") renderSettings();
 }
+
 
 // --- Utilities ---
 function bytes(n) {
@@ -211,6 +240,13 @@ function relative(iso) {
   return `${date.toLocaleDateString()} ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
 }
 
+function dateTime(iso) {
+  if (!iso) return "Never";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "-";
+  return `${date.toLocaleDateString()} ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+}
+
 function badge(status) {
   const cls = {
     verified: "badge-verified",
@@ -224,9 +260,29 @@ function badge(status) {
     disabled: "badge-failed",
     "Super Admin": "badge-verified",
     Admin: "badge-pending",
-    User: "badge-default"
+    User: "badge-default",
+    live: "badge-verified",
+    deploying: "badge-pending",
+    none: "badge-default",
+    publish_failed: "badge-failed"
   };
   return `<span class="badge ${cls[status] || "badge-default"}">${status}</span>`;
+}
+
+// Derive the base domain for static site URLs from window.location.
+// e.g. "app.example.com" → "example.com", "localhost:8080" → "localhost"
+function getBaseDomain() {
+  const hostname = window.location.hostname;
+  if (hostname === "localhost" || hostname === "127.0.0.1") return "localhost";
+  const parts = hostname.split(".");
+  // Strip the first subdomain part ("app", "www", etc.)
+  if (parts.length >= 3) return parts.slice(1).join(".");
+  return hostname;
+}
+
+function websiteThumbnailURL(site) {
+  if (!site?.id || site.thumbnail_status !== "ready") return "";
+  return `/static-thumbnails/${encodeURIComponent(site.id)}/thumbnail.png`;
 }
 
 function roleLabel(user) {
@@ -339,8 +395,7 @@ function clearSession() {
   currentUser = null;
   localStorage.removeItem("access_token");
   localStorage.removeItem("refresh_token");
-  eventSource?.close();
-  eventSource = null;
+  disconnectEvents({ reconnect: false });
   window.location.href = "/app/login.html";
 }
 
@@ -441,19 +496,61 @@ window.addEventListener("hashchange", async () => {
 });
 
 // --- SSE ---
+function clearEventReconnectTimer() {
+  if (eventReconnectTimer) {
+    clearTimeout(eventReconnectTimer);
+    eventReconnectTimer = null;
+  }
+}
+
+function disconnectEvents({ reconnect = false } = {}) {
+  shouldReconnectEvents = reconnect;
+  clearEventReconnectTimer();
+  if (eventSource) {
+    eventSource.close();
+    eventSource = null;
+  }
+  if (!reconnect) {
+    eventReconnectAttempts = 0;
+  }
+}
+
+function scheduleEventReconnect() {
+  if (!shouldReconnectEvents || !accessToken) return;
+  clearEventReconnectTimer();
+  const delay = Math.min(10000, 1500 * Math.max(1, eventReconnectAttempts));
+  eventReconnectTimer = setTimeout(() => {
+    eventReconnectTimer = null;
+    connectEvents();
+  }, delay);
+}
+
 function connectEvents() {
-  if (eventSource || !accessToken) return;
+  if (eventSource || !accessToken || !currentUser) return;
+  shouldReconnectEvents = true;
+  clearEventReconnectTimer();
   eventSource = new EventSource(`/api/events/stream?token=${encodeURIComponent(accessToken)}`);
+  eventSource.onopen = () => {
+    eventReconnectAttempts = 0;
+  };
   eventSource.addEventListener("mail.received", async () => {
     if (currentView === "email") await renderEmail();
     if (currentView === "dashboard") await renderDashboard();
   });
   eventSource.onerror = () => {
-    eventSource?.close();
-    eventSource = null;
-    setTimeout(connectEvents, 1500);
+    if (!shouldReconnectEvents) {
+      disconnectEvents({ reconnect: false });
+      return;
+    }
+    eventReconnectAttempts += 1;
+    disconnectEvents({ reconnect: true });
+    scheduleEventReconnect();
   };
 }
+
+window.addEventListener("beforeunload", () => {
+  disconnectEvents({ reconnect: false });
+});
 
 // =============================================
 // VIEWS
@@ -608,6 +705,7 @@ async function renderDomains() {
               <tr>
                 <th>Domain</th>
                 <th>MX</th>
+                <th>A Record</th>
                 <th>Status</th>
                 <th>Last Verified</th>
                 <th>Actions</th>
@@ -621,12 +719,18 @@ async function renderDomains() {
                     ${domain.verification_error ? `<p style="font-size:12px;color:var(--color-danger);margin-top:2px">${escapeHTML(domain.verification_error)}</p>` : ""}
                   </td>
                   <td style="font-size:13px;color:var(--color-text-secondary)">${escapeHTML(domain.mx_target)}</td>
+                  <td style="font-size:13px">
+                    ${domain.a_record_status === "verified" ? `<span style="color:var(--color-success)" title="${escapeHTML(domain.a_record_result || '')}">✓ ${escapeHTML(domain.a_record_result || '')}</span>` : domain.a_record_status === "failed" ? `<span style="color:var(--color-danger)" title="${escapeHTML(domain.a_record_result || '')}">✗ ${escapeHTML(domain.a_record_result || '')}</span>` : `<span style="color:var(--color-text-secondary)">—</span>`}
+                  </td>
                   <td>${badge(domain.warning_status || domain.status)}</td>
                   <td style="font-size:13px;color:var(--color-text-secondary)">${relative(domain.last_verified_at)}</td>
                   <td>
                     <div style="display:flex;gap:4px">
                       <button data-domain-verify="${domain.id}" class="icon-btn" title="Verify">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                      </button>
+                      <button data-domain-email-auth="${domain.id}" class="icon-btn" title="SPF/DKIM">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3v8z"/><path d="m9 12 2 2 4-5"/></svg>
                       </button>
                       <button data-domain-delete="${domain.id}" class="icon-btn" title="Delete" style="color:var(--color-danger)">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
@@ -636,7 +740,7 @@ async function renderDomains() {
                 </tr>
               `).join("") : `
                 <tr>
-                  <td colspan="5">
+                  <td colspan="6">
                     <div class="empty-state">
                       <div class="empty-state-icon">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
@@ -691,6 +795,11 @@ async function renderDomains() {
       }
     };
   });
+  document.querySelectorAll("[data-domain-email-auth]").forEach((button) => {
+    button.onclick = async () => {
+      await openDomainEmailAuthModal(button.dataset.domainEmailAuth);
+    };
+  });
   document.querySelectorAll("[data-domain-delete]").forEach((button) => {
     button.onclick = async () => {
       const domainId = button.dataset.domainDelete;
@@ -706,13 +815,114 @@ async function renderDomains() {
   });
 }
 
+async function openDomainEmailAuthModal(domainId) {
+  const domain = state.domains.find((d) => d.id === domainId);
+  openModal("SPF / DKIM", `<p style="font-size:13px;color:var(--color-text-secondary)">Loading DNS records...</p>`);
+  try {
+    const payload = await api(`/domains/${domainId}/email-auth`);
+    renderDomainEmailAuthModal(domainId, domain?.name || "", payload);
+  } catch (error) {
+    els.modalBody.innerHTML = `<p class="form-message error">${escapeHTML(error.message)}</p>`;
+  }
+}
+
+function renderDomainEmailAuthModal(domainId, domainName, payload) {
+  const auth = payload.auth || {};
+  const spf = payload.spf || {};
+  const dkim = payload.dkim || {};
+  els.modalBody.innerHTML = `
+    <div style="display:grid;gap:14px">
+      <div class="info-row">
+        <span class="info-row-label">Domain</span>
+        <span class="info-row-value">${escapeHTML(domainName)}</span>
+      </div>
+      <div style="display:grid;gap:10px">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+          <h4 style="font-size:14px;font-weight:600">SPF</h4>
+          ${badge(auth.spf_status || "pending")}
+        </div>
+        ${renderDNSInstruction(spf)}
+        ${auth.spf_error ? `<p style="font-size:12px;color:var(--color-danger)">${escapeHTML(auth.spf_error)}</p>` : ""}
+      </div>
+      <div style="display:grid;gap:10px">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+          <h4 style="font-size:14px;font-weight:600">DKIM</h4>
+          ${badge(auth.dkim_status || "pending")}
+        </div>
+        ${dkim.value ? renderDNSInstruction(dkim) : `<p style="font-size:13px;color:var(--color-text-secondary)">Generate a DKIM selector to create the TXT record.</p>`}
+        ${auth.dkim_error ? `<p style="font-size:12px;color:var(--color-danger)">${escapeHTML(auth.dkim_error)}</p>` : ""}
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+        <button id="generateDKIMBtn" class="btn btn-secondary btn-sm">Generate DKIM</button>
+        <button id="verifyEmailAuthBtn" class="btn btn-primary btn-sm">Verify SPF/DKIM</button>
+      </div>
+      <p id="domainEmailAuthMessage" class="form-message hidden"></p>
+    </div>
+  `;
+  document.querySelectorAll("[data-copy-value]").forEach((button) => {
+    button.onclick = async () => {
+      const value = button.dataset.copyValue || "";
+      try {
+        await navigator.clipboard.writeText(value);
+        button.textContent = "Copied";
+        setTimeout(() => { button.textContent = "Copy"; }, 900);
+      } catch (_) {
+        alert(value);
+      }
+    };
+  });
+  document.getElementById("generateDKIMBtn").onclick = async () => {
+    const message = document.getElementById("domainEmailAuthMessage");
+    try {
+      const next = await api(`/domains/${domainId}/email-auth/dkim/generate`, { method: "POST", body: JSON.stringify({}) });
+      flash(message, "DKIM record generated.", true);
+      renderDomainEmailAuthModal(domainId, domainName, next);
+    } catch (error) {
+      flash(message, error.message, false);
+    }
+  };
+  document.getElementById("verifyEmailAuthBtn").onclick = async () => {
+    const message = document.getElementById("domainEmailAuthMessage");
+    try {
+      const next = await api(`/domains/${domainId}/email-auth/verify`, { method: "POST" });
+      flash(message, "Verification complete.", true);
+      renderDomainEmailAuthModal(domainId, domainName, next);
+    } catch (error) {
+      flash(message, error.message, false);
+    }
+  };
+}
+
+function renderDNSInstruction(record) {
+  const name = record.name || "";
+  const value = record.value || "";
+  return `
+    <div style="display:grid;gap:8px;border:1px solid var(--color-border);border-radius:8px;padding:10px;background:var(--color-surface-hover)">
+      <div class="info-row">
+        <span class="info-row-label">Type</span>
+        <span class="info-row-value">${escapeHTML(record.type || "TXT")}</span>
+      </div>
+      <div class="info-row">
+        <span class="info-row-label">Name</span>
+        <span class="info-row-value" style="font-size:12px;word-break:break-all">${escapeHTML(name)}</span>
+      </div>
+      <div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px">
+          <span class="info-row-label">Value</span>
+          <button type="button" class="btn btn-secondary btn-xs" data-copy-value="${escapeHTML(value)}">Copy</button>
+        </div>
+        <pre style="white-space:pre-wrap;word-break:break-all;font-size:12px;line-height:1.45;background:var(--color-surface);border:1px solid var(--color-border);border-radius:6px;padding:8px;margin:0">${escapeHTML(value)}</pre>
+      </div>
+    </div>
+  `;
+}
+
 async function submitDomainForm(event) {
   event.preventDefault();
   const form = event.currentTarget;
   const message = document.getElementById("domainFormMessage");
   const name = form.elements.name.value.trim();
 
-  // Client-side validation
   if (!name) {
     flash(message, "Domain name is required.", false);
     return;
@@ -754,7 +964,6 @@ async function renderEmail() {
   state.emailPagination = Array.isArray(emailsPayload) ? null : emailsPayload.pagination;
   state.domains = domains;
 
-  // Determine selected inbox
   state.selectedInboxID = inboxes.find((i) => i.id === state.selectedInboxID)?.id ||
     state.emails.find((m) => m.id === state.selectedEmailID)?.inbox_id ||
     inboxes[0]?.id || null;
@@ -767,7 +976,7 @@ async function renderEmail() {
     filteredEmails[0]?.id || null;
 
   const selectedInbox = inboxes.find((i) => i.id === state.selectedInboxID);
-  const unreadCount = emails.filter((m) => !m.is_read).length;
+  const unreadCount = state.emails.filter((m) => !m.is_read).length;
 
   els.pageContent.innerHTML = `
     <div class="email-layout">
@@ -829,7 +1038,7 @@ async function renderEmail() {
           `).join("") : `
             <div class="empty-state">
               <div class="empty-state-icon">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
               </div>
               <p class="empty-state-title">No messages</p>
               <p class="empty-state-desc">Waiting for inbound mail to arrive.</p>
@@ -856,7 +1065,6 @@ async function renderEmail() {
     </div>
   `;
 
-  // Bind events
   document.getElementById("addInboxBtn").onclick = () => {
     openModal("New Address", `
       <form id="inboxForm">
@@ -1039,7 +1247,6 @@ async function submitInboxForm(event) {
   const localPart = form.elements.local_part.value.trim();
   const domainID = form.elements.domain_id?.value || "";
 
-  // Client-side validation
   if (!localPart) {
     flash(message, "Local part is required.", false);
     return;
@@ -1070,6 +1277,324 @@ async function submitInboxForm(event) {
   } catch (error) {
     flash(message, error.message, false);
   }
+}
+
+// --- API Keys ---
+async function renderApiKeys() {
+  setView("api-keys");
+  els.pageContent.innerHTML = `<div style="text-align:center;padding:48px"><p style="color:var(--color-text-tertiary)">Loading API keys...</p></div>`;
+
+  try {
+    const [keys, settings] = await Promise.all([
+      api("/api-keys"),
+      api("/api-keys/settings")
+    ]);
+    state.apiKeys = Array.isArray(keys) ? keys : [];
+    state.smtpSettings = settings || state.apiKeys[0]?.smtp_settings || defaultSmtpSettings();
+
+    els.pageContent.innerHTML = `
+      <div class="card" style="margin-bottom:20px">
+        <div class="card-header">
+          <div>
+            <h3>API Keys</h3>
+            <p class="sub">Credentials for SMTP relay clients.</p>
+          </div>
+          <div style="display:flex;gap:8px">
+            <button id="refreshApiKeysBtn" class="btn btn-secondary btn-sm">Refresh</button>
+            <button id="createApiKeyBtn" class="btn btn-primary btn-sm">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              Create API Key
+            </button>
+          </div>
+        </div>
+        <div class="card-body" style="padding:0">
+          <div class="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>API Key</th>
+                  <th>Secret Key</th>
+                  <th>Scope</th>
+                  <th>Status</th>
+                  <th>Last Used</th>
+                  <th>Expires</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${state.apiKeys.length ? state.apiKeys.map((key) => `
+                  <tr>
+                    <td>
+                      <p style="font-weight:600">${escapeHTML(key.name)}</p>
+                    </td>
+                    <td>
+                      <code class="inline-code">${escapeHTML(key.id || "-")}</code>
+                      <p style="font-size:12px;color:var(--color-text-tertiary);margin-top:4px">Prefix ${escapeHTML(key.key_prefix || "-")}</p>
+                    </td>
+                    <td><span style="font-size:13px;color:var(--color-text-secondary)">Shown once at creation</span></td>
+                    <td>${badge(key.scopes || "send_email")}</td>
+                    <td>${badge(key.is_active ? "active" : "disabled")}</td>
+                    <td style="font-size:13px;color:var(--color-text-secondary)">${dateTime(key.last_used_at)}</td>
+                    <td style="font-size:13px;color:var(--color-text-secondary)">${key.expires_at ? dateTime(key.expires_at) : "Never"}</td>
+                    <td>
+                      <div style="display:flex;gap:4px">
+                        <button data-api-key-copy="${key.id}" class="icon-btn" title="Copy API Key">
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                        </button>
+                        ${key.is_active ? `
+                          <button data-api-key-revoke="${key.id}" class="icon-btn" title="Revoke" style="color:var(--color-warning)">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+                          </button>
+                        ` : ""}
+                        <button data-api-key-delete="${key.id}" class="icon-btn" title="Delete" style="color:var(--color-danger)">
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                `).join("") : `
+                  <tr>
+                    <td colspan="8">
+                      <div class="empty-state">
+                        <div class="empty-state-icon">
+                          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 7h.01"/><path d="M10.5 12.5 8 15l-2-2-3 3 2 2 3-3 2 2 2.5-2.5"/><path d="M16 3a5 5 0 0 1 3.54 8.54l-7 7A5 5 0 0 1 5.46 11.46l7-7A5 5 0 0 1 16 3Z"/></svg>
+                        </div>
+                        <p class="empty-state-title">No API keys yet</p>
+                        <p class="empty-state-desc">Create a key to connect WordPress or another SMTP client.</p>
+                      </div>
+                    </td>
+                  </tr>
+                `}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      ${renderSmtpSettingsPanel(state.smtpSettings)}
+    `;
+
+    document.getElementById("refreshApiKeysBtn").onclick = renderApiKeys;
+    document.getElementById("createApiKeyBtn").onclick = openCreateApiKeyModal;
+    document.querySelectorAll("[data-api-key-copy]").forEach((button) => {
+      button.onclick = async () => {
+        await copyText(button.dataset.apiKeyCopy);
+        button.title = "Copied";
+      };
+    });
+    document.querySelectorAll("[data-api-key-revoke]").forEach((button) => {
+      button.onclick = async () => {
+        const key = state.apiKeys.find((row) => row.id === button.dataset.apiKeyRevoke);
+        if (!confirm(`Revoke API key "${key?.name || "this key"}"? Existing SMTP clients using it will stop working.`)) return;
+        try {
+          await api(`/api-keys/${button.dataset.apiKeyRevoke}/revoke`, { method: "POST" });
+          await renderApiKeys();
+        } catch (error) {
+          alert(error.message);
+        }
+      };
+    });
+    document.querySelectorAll("[data-api-key-delete]").forEach((button) => {
+      button.onclick = async () => {
+        const key = state.apiKeys.find((row) => row.id === button.dataset.apiKeyDelete);
+        if (!confirm(`Delete API key "${key?.name || "this key"}"?`)) return;
+        try {
+          await api(`/api-keys/${button.dataset.apiKeyDelete}`, { method: "DELETE" });
+          await renderApiKeys();
+        } catch (error) {
+          alert(error.message);
+        }
+      };
+    });
+  } catch (error) {
+    els.pageContent.innerHTML = `
+      <div class="empty-state">
+        <p class="empty-state-title">Failed to load API keys</p>
+        <p class="empty-state-desc">${escapeHTML(error.message)}</p>
+        <button onclick="renderApiKeys()" class="btn btn-secondary btn-sm" style="margin-top:12px">Retry</button>
+      </div>
+    `;
+  }
+}
+
+function defaultSmtpSettings() {
+  const base = getBaseDomain();
+  return {
+    host: base === "localhost" ? "smtp.localhost" : `smtp.${base}`,
+    port_587: "587",
+    port_465: "465",
+    recommended_security: "STARTTLS on 587, implicit TLS on 465",
+    username_format: "api_key",
+    password_format: "secret_key"
+  };
+}
+
+function renderSmtpSettingsPanel(settings) {
+  const s = settings || defaultSmtpSettings();
+  return `
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <h3>SMTP Configuration</h3>
+          <p class="sub">Use these values in your SMTP plugin or external app.</p>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="smtp-settings-grid">
+          <div class="smtp-setting">
+            <span class="smtp-setting-label">Host</span>
+            <code class="smtp-setting-value">${escapeHTML(s.host || "-")}</code>
+          </div>
+          <div class="smtp-setting">
+            <span class="smtp-setting-label">Port</span>
+            <code class="smtp-setting-value">${escapeHTML(s.port_587 || "587")}</code>
+            <span class="smtp-setting-note">STARTTLS</span>
+          </div>
+          <div class="smtp-setting">
+            <span class="smtp-setting-label">TLS Port</span>
+            <code class="smtp-setting-value">${escapeHTML(s.port_465 || "465")}</code>
+            <span class="smtp-setting-note">Implicit TLS</span>
+          </div>
+          <div class="smtp-setting">
+            <span class="smtp-setting-label">Username</span>
+            <code class="smtp-setting-value">API Key</code>
+          </div>
+          <div class="smtp-setting">
+            <span class="smtp-setting-label">Password</span>
+            <code class="smtp-setting-value">Secret Key</code>
+          </div>
+          <div class="smtp-setting">
+            <span class="smtp-setting-label">Security</span>
+            <code class="smtp-setting-value">${escapeHTML(s.recommended_security || "STARTTLS on 587")}</code>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function openCreateApiKeyModal() {
+  openModal("Create API Key", `
+    <form id="apiKeyForm">
+      <div class="form-group">
+        <label for="apiKeyName">Name</label>
+        <input id="apiKeyName" name="name" placeholder="WordPress production" required />
+      </div>
+      <div class="form-group">
+        <label for="apiKeyScope">Scope</label>
+        <select id="apiKeyScope" name="scope">
+          <option value="send_email">Send email</option>
+          <option value="full_access">Full access</option>
+        </select>
+      </div>
+      <button type="submit" class="btn btn-primary btn-full">Create API Key</button>
+      <p id="apiKeyFormMessage" class="form-message hidden"></p>
+    </form>
+  `);
+  document.getElementById("apiKeyForm").onsubmit = submitApiKeyForm;
+  setTimeout(() => document.getElementById("apiKeyName")?.focus(), 0);
+}
+
+async function submitApiKeyForm(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const message = document.getElementById("apiKeyFormMessage");
+  const name = form.elements.name.value.trim();
+  const scope = form.elements.scope.value;
+
+  if (!name) {
+    flash(message, "Name is required.", false);
+    return;
+  }
+
+  try {
+    const created = await api("/api-keys", {
+      method: "POST",
+      body: JSON.stringify({ name, scope })
+    });
+    showCreatedApiKey(created);
+  } catch (error) {
+    flash(message, error.message, false);
+  }
+}
+
+function showCreatedApiKey(created) {
+  const settings = created.smtp_settings || state.smtpSettings || defaultSmtpSettings();
+  const apiKey = created.api_key || created.id || "";
+  const secretKey = created.secret_key || created.full_api_key || "";
+  openModal("API Key Created", `
+    <div class="api-key-reveal">
+      <p class="api-key-reveal-note">The Secret Key is shown once. Use API Key as the SMTP username and Secret Key as the SMTP password.</p>
+      <div class="form-group">
+        <label>API Key</label>
+        <div class="copy-field">
+          <code id="createdApiKeyValue">${escapeHTML(apiKey)}</code>
+          <button id="copyCreatedApiKeyBtn" class="btn btn-secondary btn-sm">Copy API Key</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Secret Key</label>
+        <div class="copy-field">
+          <code id="createdSecretKeyValue">${escapeHTML(secretKey)}</code>
+          <button id="copyCreatedSecretKeyBtn" class="btn btn-secondary btn-sm">Copy Secret</button>
+        </div>
+      </div>
+      <div class="smtp-settings-grid" style="margin-top:12px">
+        <div class="smtp-setting">
+          <span class="smtp-setting-label">SMTP host</span>
+          <code class="smtp-setting-value">${escapeHTML(settings.host || "-")}</code>
+        </div>
+        <div class="smtp-setting">
+          <span class="smtp-setting-label">Username</span>
+          <code class="smtp-setting-value">${escapeHTML(apiKey)}</code>
+        </div>
+        <div class="smtp-setting">
+          <span class="smtp-setting-label">Password</span>
+          <code class="smtp-setting-value">Secret Key</code>
+        </div>
+        <div class="smtp-setting">
+          <span class="smtp-setting-label">Port</span>
+          <code class="smtp-setting-value">${escapeHTML(settings.port_587 || "587")}</code>
+          <span class="smtp-setting-note">STARTTLS</span>
+        </div>
+        <div class="smtp-setting">
+          <span class="smtp-setting-label">TLS Port</span>
+          <code class="smtp-setting-value">${escapeHTML(settings.port_465 || "465")}</code>
+          <span class="smtp-setting-note">Implicit TLS</span>
+        </div>
+      </div>
+      <button id="doneCreatedApiKeyBtn" class="btn btn-primary btn-full" style="margin-top:16px">Done</button>
+    </div>
+  `);
+  document.getElementById("copyCreatedApiKeyBtn").onclick = async () => {
+    await copyText(apiKey);
+    document.getElementById("copyCreatedApiKeyBtn").textContent = "Copied";
+  };
+  document.getElementById("copyCreatedSecretKeyBtn").onclick = async () => {
+    await copyText(secretKey);
+    document.getElementById("copyCreatedSecretKeyBtn").textContent = "Copied";
+  };
+  document.getElementById("doneCreatedApiKeyBtn").onclick = async () => {
+    closeModal();
+    await renderApiKeys();
+  };
+}
+
+async function copyText(value) {
+  if (!value) return;
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const input = document.createElement("textarea");
+  input.value = value;
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  document.body.appendChild(input);
+  input.select();
+  document.execCommand("copy");
+  input.remove();
 }
 
 // --- Users ---
@@ -1129,6 +1654,7 @@ async function renderUsers() {
                 <th>Inboxes</th>
                 <th>Message</th>
                 <th>Storage</th>
+                <th>Websites</th>
                 <th>Created</th>
                 <th>Actions</th>
               </tr>
@@ -1153,6 +1679,7 @@ async function renderUsers() {
                       <p style="font-size:12px;color:var(--color-text-tertiary);margin-top:4px">${bytes(user.storage_used_bytes)} / ${bytes(user.max_storage_bytes)}</p>
                     </div>
                   </td>
+                  <td style="color:var(--color-text-secondary)">${user.max_websites}</td>
                   <td style="font-size:13px;color:var(--color-text-secondary)">${relative(user.created_at)}</td>
                   <td>
                     <div style="display:flex;gap:4px">
@@ -1175,7 +1702,7 @@ async function renderUsers() {
                 </tr>
               `).join("") : `
                 <tr>
-                  <td colspan="9">
+                  <td colspan="10">
                     <div class="empty-state">
                       <p class="empty-state-title">No users found</p>
                     </div>
@@ -1256,9 +1783,15 @@ function openUserQuotaModal(userID) {
           <input id="maxAttachmentSizeMB" name="max_attachment_size_mb" type="number" min="1" step="1" value="${user.max_attachment_size_mb}" />
         </div>
       </div>
-      <div class="form-group">
-        <label for="maxStorageGB">Max storage GB</label>
-        <input id="maxStorageGB" name="max_storage_gb" type="number" min="1" step="0.1" value="${gb(user.max_storage_bytes)}" />
+      <div class="grid-2 grid-2-equal" style="gap:12px">
+        <div class="form-group">
+          <label for="maxStorageGB">Max storage GB</label>
+          <input id="maxStorageGB" name="max_storage_gb" type="number" min="1" step="0.1" value="${gb(user.max_storage_bytes)}" />
+        </div>
+        <div class="form-group">
+          <label for="maxWebsites">Max websites</label>
+          <input id="maxWebsites" name="max_websites" type="number" min="0" step="1" value="${user.max_websites ?? 5}" />
+        </div>
       </div>
       <button type="submit" class="btn btn-primary btn-full">Save Quotas</button>
       <p id="userQuotaFormMessage" class="form-message hidden"></p>
@@ -1275,7 +1808,8 @@ function openUserQuotaModal(userID) {
       max_inboxes: Number(form.elements.max_inboxes.value),
       max_message_size_mb: Number(form.elements.max_message_size_mb.value),
       max_attachment_size_mb: Number(form.elements.max_attachment_size_mb.value),
-      max_storage_bytes: Math.round(maxStorageGB * 1024 * 1024 * 1024)
+      max_storage_bytes: Math.round(maxStorageGB * 1024 * 1024 * 1024),
+      max_websites: Number(form.elements.max_websites.value)
     };
 
     if (
@@ -1284,6 +1818,7 @@ function openUserQuotaModal(userID) {
       payload.max_message_size_mb < 1 ||
       payload.max_attachment_size_mb < 1 ||
       payload.max_storage_bytes < 1 ||
+      payload.max_websites < 0 ||
       Object.values(payload).some((value) => !Number.isFinite(value))
     ) {
       flash(message, "Quota values must be valid numbers. Size and storage quotas must be at least 1.", false);
@@ -1303,8 +1838,544 @@ function openUserQuotaModal(userID) {
   };
 }
 
+// =============================================
+// WEBSITES VIEW
+// =============================================
+
+async function renderWebsites() {
+  setView("websites");
+  els.pageContent.innerHTML = `<div style="text-align:center;padding:48px"><p style="color:var(--color-text-tertiary)">Loading websites...</p></div>`;
+
+  try {
+    const projects = await api("/static-projects");
+    state.websites = projects || [];
+    const used = projects?.[0]?.websites_used || state.websites.length;
+    const max = projects?.[0]?.max_websites || currentUser?.max_websites || 5;
+    state.websiteQuota = { used, max };
+
+    els.pageContent.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+        <div>
+          <div style="font-size:13px;color:var(--color-text-secondary)">
+            <strong>${used}</strong> / <strong>${max}</strong> websites used
+            <span style="margin-left:8px;font-size:12px;color:var(--color-text-tertiary)">${max - used} remaining</span>
+          </div>
+        </div>
+        <button id="deployWebsiteBtn" class="btn btn-primary btn-sm">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          Deploy Website
+        </button>
+      </div>
+      ${state.websites.length ? `
+        <div class="websites-grid">
+          ${state.websites.map((site) => `
+            <div class="website-card">
+              <div class="website-card-thumb">
+                ${websiteThumbnailURL(site)
+                  ? `<img src="${escapeHTML(websiteThumbnailURL(site))}" alt="${escapeHTML(site.name)}" />`
+                  : `<div class="website-card-placeholder">${initials(site.name)}</div>`
+                }
+              </div>
+              <div class="website-card-body">
+                <div class="website-card-top">
+                  <h4 class="website-card-name">${escapeHTML(site.name)}</h4>
+                  ${badge(site.ui_state || site.status)}
+                </div>
+                <p class="website-card-url">${escapeHTML(site.subdomain ? site.subdomain + "." + getBaseDomain() : "")}</p>
+                <p class="website-card-meta">${bytes(site.archive_size_bytes || 0)} &middot; ${site.file_count || 0} files &middot; ${relative(site.published_at || site.created_at)}</p>
+                ${site.deploy_error ? `<p class="website-card-error">${escapeHTML(site.deploy_error)}</p>` : ""}
+              </div>
+              <div class="website-card-actions">
+                <button data-website-open="${site.id}" class="btn btn-secondary btn-xs" ${site.ui_state !== "live" ? "disabled" : ""}>Open</button>
+                <button data-website-settings="${site.id}" class="btn btn-secondary btn-xs">Settings</button>
+                <button data-website-delete="${site.id}" class="btn btn-ghost btn-xs" style="color:var(--color-danger)">Delete</button>
+              </div>
+            </div>
+          `).join("")}
+        </div>
+      ` : `
+        <div class="card">
+          <div class="card-body">
+            <div class="empty-state">
+              <div class="empty-state-icon">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
+              </div>
+              <p class="empty-state-title">No websites yet</p>
+              <p class="empty-state-desc">Deploy your first static website by uploading a ZIP archive.</p>
+            </div>
+          </div>
+        </div>
+      `}
+    `;
+
+    document.getElementById("deployWebsiteBtn").onclick = openDeployModal;
+    document.querySelectorAll("[data-website-open]").forEach((btn) => {
+      btn.onclick = () => {
+        const site = state.websites.find((s) => s.id === btn.dataset.websiteOpen);
+        if (site) {
+          const url = `http://${site.subdomain}.${getBaseDomain()}`;
+          window.open(url, "_blank");
+        }
+      };
+    });
+    document.querySelectorAll("[data-website-settings]").forEach((btn) => {
+      btn.onclick = () => renderWebsiteSettings(btn.dataset.websiteSettings);
+    });
+    document.querySelectorAll("[data-website-delete]").forEach((btn) => {
+      btn.onclick = async () => {
+        const site = state.websites.find((s) => s.id === btn.dataset.websiteDelete);
+        if (!confirm(`Delete website "${site?.name || "this project"}"? This cannot be undone.`)) return;
+        try {
+          await api(`/static-projects/${btn.dataset.websiteDelete}`, { method: "DELETE" });
+          await renderWebsites();
+        } catch (error) {
+          alert(error.message);
+        }
+      };
+    });
+  } catch (error) {
+    els.pageContent.innerHTML = `
+      <div class="card">
+        <div class="card-body">
+          <div class="empty-state">
+            <div class="empty-state-icon">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+            </div>
+            <p class="empty-state-title">Failed to load websites</p>
+            <p class="empty-state-desc">${escapeHTML(error.message)}</p>
+            <button onclick="renderWebsites()" class="btn btn-secondary btn-sm" style="margin-top:12px">Retry</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+}
+
+function openDeployModal() {
+  openModal("Deploy New Website", `
+    <form id="deployForm">
+      <div class="form-group">
+        <label for="deployName">Website name</label>
+        <input id="deployName" name="name" placeholder="My Website" value="My Website" />
+      </div>
+      <div class="form-group">
+        <label for="deployFile">ZIP archive</label>
+        <input id="deployFile" name="file" type="file" accept=".zip" required />
+        <p style="font-size:12px;color:var(--color-text-tertiary);margin-top:4px">Upload a ZIP file containing HTML, CSS, JS, and assets.</p>
+      </div>
+      <button type="submit" class="btn btn-primary btn-full" id="deploySubmitBtn">
+        <span id="deployBtnText">Upload & Deploy</span>
+        <span id="deployBtnSpinner" class="hidden" style="display:none">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="spin"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+          Deploying...
+        </span>
+      </button>
+      <p id="deployFormMessage" class="form-message hidden"></p>
+    </form>
+  `);
+  document.getElementById("deployForm").onsubmit = submitDeployForm;
+  setTimeout(() => document.getElementById("deployName")?.focus(), 0);
+}
+
+async function submitDeployForm(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const message = document.getElementById("deployFormMessage");
+  const submitBtn = document.getElementById("deploySubmitBtn");
+  const btnText = document.getElementById("deployBtnText");
+  const btnSpinner = document.getElementById("deployBtnSpinner");
+
+  const name = form.elements.name.value.trim() || "My Website";
+  const fileInput = form.elements.file;
+  if (!fileInput.files?.length) {
+    flash(message, "Please select a ZIP file.", false);
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append("name", name);
+  formData.append("file", fileInput.files[0]);
+
+  submitBtn.disabled = true;
+  btnText.style.display = "none";
+  btnSpinner.style.display = "inline";
+  flash(message, "", false);
+
+  try {
+    await api("/static-projects/deploy", {
+      method: "POST",
+      body: formData
+    });
+    closeModal();
+    await renderWebsites();
+  } catch (error) {
+    flash(message, error.message, false);
+    submitBtn.disabled = false;
+    btnText.style.display = "inline";
+    btnSpinner.style.display = "none";
+  }
+}
+
+// --- Website Settings ---
+async function renderWebsiteSettings(projectID) {
+  setView(`websites/${projectID}`);
+
+  els.pageContent.innerHTML = `<div style="text-align:center;padding:48px"><p style="color:var(--color-text-tertiary)">Loading...</p></div>`;
+
+  try {
+    const project = await api(`/static-projects/${projectID}`);
+    const baseUrl = getBaseDomain();
+    const siteUrl = project.subdomain ? `${project.subdomain}.${baseUrl}` : "";
+
+    els.pageContent.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+        <div>
+          <p style="font-size:13px;color:var(--color-text-tertiary)">Website / ${escapeHTML(project.name)}</p>
+          <h2 style="font-size:22px;font-weight:700;margin-top:2px">${escapeHTML(project.name)}</h2>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button id="backToWebsitesBtn" class="btn btn-secondary btn-sm">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+            Back
+          </button>
+          ${siteUrl ? `<a href="http://${escapeHTML(siteUrl)}" target="_blank" class="btn btn-primary btn-sm">Open Site</a>` : ""}
+        </div>
+      </div>
+
+      <div style="display:flex;gap:8px;margin-bottom:20px;border-bottom:1px solid var(--color-border);padding-bottom:0">
+        <button class="website-tab active" data-tab="overview">Overview</button>
+        <button class="website-tab" data-tab="upload">Upload New Version</button>
+        <button class="website-tab" data-tab="domains">Domains</button>
+      </div>
+
+      <div id="websiteSettingsContent">
+        ${renderWebsiteOverview(project, siteUrl)}
+      </div>
+    `;
+
+    document.getElementById("backToWebsitesBtn").onclick = () => renderWebsites();
+
+    document.querySelectorAll(".website-tab").forEach((tab) => {
+      tab.onclick = () => {
+        document.querySelectorAll(".website-tab").forEach((t) => t.classList.remove("active"));
+        tab.classList.add("active");
+        const tabName = tab.dataset.tab;
+        const content = document.getElementById("websiteSettingsContent");
+        if (tabName === "overview") {
+          content.innerHTML = renderWebsiteOverview(project, siteUrl);
+          wireOverviewHandlers(project.id);
+        } else if (tabName === "upload") {
+          content.innerHTML = renderWebsiteUploadTab(project);
+          wireUploadHandlers(project.id);
+        } else if (tabName === "domains") {
+          content.innerHTML = renderWebsiteDomainsTab(project);
+          wireDomainHandlers(project);
+        }
+      };
+    });
+
+    // Wire initial handlers
+    wireOverviewHandlers(project.id);
+  } catch (error) {
+
+    els.pageContent.innerHTML = `
+      <div class="card">
+        <div class="card-body">
+          <div class="empty-state">
+            <p class="empty-state-title">Failed to load website</p>
+            <p class="empty-state-desc">${escapeHTML(error.message)}</p>
+            <button onclick="renderWebsites()" class="btn btn-secondary btn-sm" style="margin-top:12px">Back to Websites</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+}
+
+function renderWebsiteOverview(project, siteUrl) {
+  return `
+    <div class="grid-2 grid-2-equal">
+      <div class="card">
+        <div class="card-header"><h3>Details</h3></div>
+        <div class="card-body">
+          <div class="info-row">
+            <span class="info-row-label">Status</span>
+            <span class="info-row-value">${badge(project.ui_state || project.status)}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-row-label">Subdomain</span>
+            <span class="info-row-value" style="font-size:12px">${escapeHTML(project.subdomain || "-")}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-row-label">Custom Domain</span>
+            <span class="info-row-value">${escapeHTML(project.assigned_domain || "-")}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-row-label">Domain Binding</span>
+            <span class="info-row-value">${badge(project.domain_binding_status || "none")}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-row-label">Archive Size</span>
+            <span class="info-row-value">${bytes(project.archive_size_bytes || 0)}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-row-label">Files</span>
+            <span class="info-row-value">${project.file_count || 0}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-row-label">Published</span>
+            <span class="info-row-value">${relative(project.published_at)}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-row-label">Detected Root</span>
+            <span class="info-row-value" style="font-size:12px">${escapeHTML(project.detected_root || "-")}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><h3>Actions</h3></div>
+        <div class="card-body" style="display:flex;flex-direction:column;gap:8px">
+          <button id="toggleWebsiteBtn" class="btn ${project.is_active ? "btn-secondary" : "btn-primary"} btn-full">
+            ${project.is_active ? "Disable Website" : "Enable Website"}
+          </button>
+          ${!project.is_active ? `<p style="font-size:12px;color:var(--color-text-tertiary)">Disabled websites return 404 to visitors.</p>` : ""}
+          <button id="deleteWebsiteBtn" class="btn btn-danger btn-full">Delete Website</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderWebsiteUploadTab(project) {
+  return `
+    <div class="card">
+      <div class="card-header"><h3>Upload New Version</h3></div>
+      <div class="card-body">
+        <p style="font-size:13px;color:var(--color-text-secondary);margin-bottom:16px">Upload a new ZIP archive to replace the current website content. The subdomain and settings remain unchanged.</p>
+        <form id="redeployForm">
+          <div class="form-group">
+            <label for="redeployFile">ZIP archive</label>
+            <input id="redeployFile" name="file" type="file" accept=".zip" required />
+          </div>
+          <button type="submit" class="btn btn-primary btn-full" id="redeploySubmitBtn">
+            <span id="redeployBtnText">Upload & Redeploy</span>
+            <span id="redeployBtnSpinner" class="hidden" style="display:none">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="spin"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+              Deploying...
+            </span>
+          </button>
+          <p id="redeployFormMessage" class="form-message hidden"></p>
+        </form>
+      </div>
+    </div>
+  `;
+}
+
+function renderWebsiteDomainsTab(project) {
+  return `
+    <div class="card" style="margin-bottom:20px">
+      <div class="card-header"><h3>Custom Domain</h3></div>
+      <div class="card-body">
+        ${project.assigned_domain ? `
+          <div class="info-row">
+            <span class="info-row-label">Assigned Domain</span>
+            <span class="info-row-value">${escapeHTML(project.assigned_domain)}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-row-label">Binding Status</span>
+            <span class="info-row-value">${badge(project.domain_binding_status || "none")}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-row-label">DNS Check</span>
+            <span class="info-row-value">${escapeHTML(project.domain_last_dns_result || "Not checked")}</span>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:16px">
+            <button id="checkDomainIPBtn" class="btn btn-secondary btn-sm">Check DNS</button>
+            <button id="activeSSLBtn" class="btn btn-secondary btn-sm">Active SSL</button>
+            <button id="unassignDomainBtn" class="btn btn-ghost btn-sm" style="color:var(--color-danger)">Unassign</button>
+          </div>
+        ` : `
+          <p style="font-size:13px;color:var(--color-text-secondary);margin-bottom:12px">Assign a verified domain to this website.</p>
+          <div id="availableDomainsContainer">
+            <p style="font-size:13px;color:var(--color-text-tertiary)">Loading available domains...</p>
+          </div>
+        `}
+      </div>
+    </div>
+    ${!project.assigned_domain ? `
+    <div class="card">
+      <div class="card-header"><h3>Available Domains</h3></div>
+      <div class="card-body" id="availableDomainsList">
+        <p style="font-size:13px;color:var(--color-text-tertiary)">Loading...</p>
+      </div>
+    </div>
+    ` : ""}
+  `;
+}
+
+// --- Website Settings Event Handlers ---
+function wireOverviewHandlers(projectID) {
+  const toggleBtn = document.getElementById("toggleWebsiteBtn");
+  const deleteBtn = document.getElementById("deleteWebsiteBtn");
+  if (toggleBtn) {
+    toggleBtn.onclick = async () => {
+      try {
+        const project = await api(`/static-projects/${projectID}`);
+        await api(`/static-projects/${projectID}/status`, {
+          method: "PATCH",
+          body: JSON.stringify({ is_active: !project.is_active })
+        });
+        await renderWebsiteSettings(projectID);
+      } catch (error) {
+        alert(error.message);
+      }
+    };
+  }
+  if (deleteBtn) {
+    deleteBtn.onclick = async () => {
+      if (!confirm("Delete this website? This cannot be undone.")) return;
+      try {
+        await api(`/static-projects/${projectID}`, { method: "DELETE" });
+        await renderWebsites();
+      } catch (error) {
+        alert(error.message);
+      }
+    };
+  }
+}
+
+function wireUploadHandlers(projectID) {
+  const form = document.getElementById("redeployForm");
+  if (!form) return;
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    const message = document.getElementById("redeployFormMessage");
+    const submitBtn = document.getElementById("redeploySubmitBtn");
+    const btnText = document.getElementById("redeployBtnText");
+    const btnSpinner = document.getElementById("redeployBtnSpinner");
+
+    const fileInput = form.elements.file;
+    if (!fileInput.files?.length) {
+      flash(message, "Please select a ZIP file.", false);
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append("file", fileInput.files[0]);
+
+    submitBtn.disabled = true;
+    btnText.style.display = "none";
+    btnSpinner.style.display = "inline";
+    flash(message, "", false);
+
+    try {
+      await api(`/static-projects/${projectID}/redeploy`, {
+        method: "POST",
+        body: formData
+      });
+      await renderWebsiteSettings(projectID);
+    } catch (error) {
+      flash(message, error.message, false);
+      submitBtn.disabled = false;
+      btnText.style.display = "inline";
+      btnSpinner.style.display = "none";
+    }
+  };
+}
+
+function wireDomainHandlers(project) {
+  const projectID = project.id;
+
+  // Load available domains if not assigned
+  if (!project.assigned_domain) {
+    (async () => {
+      try {
+        const domains = await api(`/static-projects/${projectID}/available-domains`);
+        const container = document.getElementById("availableDomainsContainer");
+        const list = document.getElementById("availableDomainsList");
+        if (!domains || !domains.length) {
+          const msg = '<p style="font-size:13px;color:var(--color-text-tertiary)">No verified domains available. Add and verify a domain first.</p>';
+          if (container) container.innerHTML = msg;
+          if (list) list.innerHTML = msg;
+          return;
+        }
+        if (container) {
+          container.innerHTML = domains.map((d) => `
+            <button class="btn btn-secondary btn-sm assign-domain-btn" data-domain-id="${d.id}" style="margin-right:6px;margin-bottom:6px">
+              ${escapeHTML(d.name)}
+            </button>
+          `).join("");
+        }
+        if (list) {
+          list.innerHTML = domains.map((d) => `
+            <div class="info-row">
+              <span class="info-row-label">${escapeHTML(d.name)}</span>
+              <button class="btn btn-secondary btn-xs assign-domain-btn" data-domain-id="${d.id}">Assign</button>
+            </div>
+          `).join("");
+        }
+        document.querySelectorAll(".assign-domain-btn").forEach((btn) => {
+          btn.onclick = async () => {
+            try {
+              await api(`/static-projects/${projectID}/domain`, {
+                method: "PATCH",
+                body: JSON.stringify({ domain_id: btn.dataset.domainId })
+              });
+              await renderWebsiteSettings(projectID);
+            } catch (error) {
+              alert(error.message);
+            }
+          };
+        });
+      } catch (error) {
+        const container = document.getElementById("availableDomainsContainer");
+        if (container) container.innerHTML = `<p style="font-size:13px;color:var(--color-danger)">${escapeHTML(error.message)}</p>`;
+      }
+    })();
+  }
+
+  // Wire existing domain actions
+  const checkBtn = document.getElementById("checkDomainIPBtn");
+  const sslBtn = document.getElementById("activeSSLBtn");
+  const unassignBtn = document.getElementById("unassignDomainBtn");
+
+  if (checkBtn) {
+    checkBtn.onclick = async () => {
+      try {
+        const result = await api(`/static-projects/${projectID}/domain/check-ip`, { method: "POST" });
+        await renderWebsiteSettings(projectID);
+      } catch (error) {
+        alert(error.message);
+      }
+    };
+  }
+  if (sslBtn) {
+    sslBtn.onclick = async () => {
+      try {
+        const result = await api(`/static-projects/${projectID}/domain/active-ssl`, { method: "POST" });
+        await renderWebsiteSettings(projectID);
+      } catch (error) {
+        alert(error.message);
+      }
+    };
+  }
+  if (unassignBtn) {
+    unassignBtn.onclick = async () => {
+      if (!confirm("Unassign this domain from the website?")) return;
+      try {
+        await api(`/static-projects/${projectID}/domain`, { method: "DELETE" });
+        await renderWebsiteSettings(projectID);
+      } catch (error) {
+        alert(error.message);
+      }
+    };
+  }
+}
+
 // --- Settings ---
 function renderSettings() {
+
   setView("settings");
 
   els.pageContent.innerHTML = `

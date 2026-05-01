@@ -15,16 +15,27 @@ import (
 const UserKey = "user"
 
 func Auth(authSvc *auth.Service, database *gorm.DB) gin.HandlerFunc {
+	return authWithTokenSource(authSvc, database, false)
+}
+
+func AuthWithQueryToken(authSvc *auth.Service, database *gorm.DB) gin.HandlerFunc {
+	return authWithTokenSource(authSvc, database, true)
+}
+
+func authWithTokenSource(authSvc *auth.Service, database *gorm.DB, allowQueryToken bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
 		token := strings.TrimPrefix(header, "Bearer ")
 		if token == "" || token == header {
-			token = c.Query("token")
+			if allowQueryToken {
+				token = strings.TrimSpace(c.Query("token"))
+			}
 			if token == "" {
 				response.Error(c, http.StatusUnauthorized, "unauthorized", "missing bearer token")
 				return
 			}
 		}
+
 		claims, err := authSvc.ParseAccessToken(token)
 		if err != nil {
 			response.Error(c, http.StatusUnauthorized, "unauthorized", "invalid token")

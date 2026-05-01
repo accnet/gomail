@@ -20,3 +20,23 @@ func TestProductionRejectsSampleSecrets(t *testing.T) {
 		t.Fatal("expected production sample secret validation failure")
 	}
 }
+
+func TestProductionRejectsDKIMEnabledWithoutEncryptionSecret(t *testing.T) {
+	cfg := Config{
+		AppEnv:               "production",
+		AppBaseURL:           "https://mail.example.com",
+		APIBaseURL:           "https://mail.example.com/api",
+		SaaSDomain:           "example.com",
+		SMTPHostname:         "mx.example.com",
+		MXTarget:             "mx.example.com",
+		DatabaseURL:          "postgres://example",
+		RedisAddr:            "redis:6379",
+		JWTSecret:            "a-realistic-production-jwt-secret-value",
+		DefaultAdminEmail:    "admin@example.com",
+		DefaultAdminPassword: "a-realistic-admin-password",
+		DKIMEnabled:          true,
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected DKIM encryption secret validation failure")
+	}
+}

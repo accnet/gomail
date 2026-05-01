@@ -1,4 +1,65 @@
+x-api-runtime-env: &api-runtime-env
+  DATABASE_URL: postgres://gomail:gomail_password@postgres:5432/gomail?sslmode=disable
+  REDIS_ADDR: redis:6379
+  STORAGE_ROOT: /app/data
+  ATTACHMENT_STORAGE_ROOT: /app/data/attachments
+  RAW_EMAIL_STORAGE_ROOT: /app/data/raw-eml
+  STATIC_SITES_ROOT: /app/data/static-sites
+  TRAEFIK_DYNAMIC_CONF_DIR: /app/data/traefik-dynamic/generated
+
+x-app-service: &app-service
+  env_file: .env.dev
+  environment: *api-runtime-env
+  depends_on:
+    - postgres
+    - redis
+
 services:
+
+  traefik:
+    image: traefik:v3.3
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=false"
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--providers.file.watch=true"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.email=admin@example.com"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/etc/traefik/acme/acme.json"
+    ports:
+      - "8081:80"
+      - "8443:443"
+      - "8091:8080"
+    volumes:
+      - ./deploy/docker/traefik/dynamic-wildcard.yaml:/etc/traefik/dynamic/wildcard.yaml:ro
+      - traefik_dynamic:/etc/traefik/dynamic/generated
+      - traefik_acme:/etc/traefik/acme
+    depends_on:
+      - static-server
+
+  api:
+    <<: *app-service
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile
+      target: api
+    ports:
+      - "8080:8080"
+    volumes:
+      - gomail_data:/app/data
+      - traefik_dynamic:/app/data/traefik-dynamic/generated
+
+  smtp:
+    <<: *app-service
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile
+      target: smtp
+    ports:
+      - "2525:2525"
+
   postgres:
     image: postgres:16-alpine
     environment:
@@ -17,6 +78,20 @@ services:
     volumes:
       - redis_data:/data
 
+  static-server:
+    <<: *app-service
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile
+      target: static-server
+    ports:
+      - "8090:8090"
+    volumes:
+      - gomail_data:/app/data
+
 volumes:
   postgres_data:
   redis_data:
+  gomail_data:
+  traefik_dynamic:
+  traefik_acme:

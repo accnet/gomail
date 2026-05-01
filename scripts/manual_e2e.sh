@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-API_BASE_URL="${API_BASE_URL:-http://localhost:8089/api}"
+API_BASE_URL="${API_BASE_URL:-http://localhost:8080/api}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-admin@example.com}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-change-me-before-deploy}"
 USER_EMAIL="${USER_EMAIL:-e2e-user@example.com}"

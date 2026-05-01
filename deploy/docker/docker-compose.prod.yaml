@@ -1,4 +1,24 @@
 services:
+  traefik:
+    image: traefik:v3.3
+    command:
+      - "--api.insecure=false"
+      - "--providers.docker=false"
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--providers.file.watch=true"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.email=admin@example.com"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/etc/traefik/acme/acme.json"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./traefik/dynamic-wildcard.yaml:/etc/traefik/dynamic/wildcard.yaml:ro
+      - traefik_dynamic:/etc/traefik/dynamic/generated
+      - traefik_acme:/etc/traefik/acme
+
   api:
     build:
       context: ../..
@@ -12,6 +32,7 @@ services:
       - "8080:8080"
     volumes:
       - gomail_data:/app/data
+      - traefik_dynamic:/app/data/traefik-dynamic/generated
 
   smtp:
     build:
@@ -24,6 +45,20 @@ services:
       - redis
     ports:
       - "25:25"
+    volumes:
+      - gomail_data:/app/data
+
+  static-server:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      target: static-server
+    env_file: ../../.env
+    depends_on:
+      - postgres
+      - redis
+    ports:
+      - "8090:8090"
     volumes:
       - gomail_data:/app/data
 
@@ -46,3 +81,5 @@ volumes:
   postgres_data:
   redis_data:
   gomail_data:
+  traefik_dynamic:
+  traefik_acme:

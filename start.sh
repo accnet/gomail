@@ -10,20 +10,20 @@ SMTP_LOG_FILE="$RUN_DIR/smtp.log"
 
 mkdir -p "$RUN_DIR" "$ROOT_DIR/data/attachments" "$ROOT_DIR/data/raw-eml"
 
-if [[ -f "$ROOT_DIR/.env" ]]; then
+if [[ -f "$ROOT_DIR/.env.dev" ]]; then
   set -a
   # shellcheck disable=SC1091
-  source "$ROOT_DIR/.env"
+  source "$ROOT_DIR/.env.dev"
   set +a
 fi
 
 export APP_ENV="${APP_ENV:-development}"
 export APP_NAME="${APP_NAME:-GoMail}"
 export SAAS_DOMAIN="${SAAS_DOMAIN:-localhost}"
-export APP_BASE_URL="${APP_BASE_URL:-http://localhost:8089}"
-export API_BASE_URL="${API_BASE_URL:-http://localhost:8089/api}"
+export APP_BASE_URL="${APP_BASE_URL:-http://localhost:8080}"
+export API_BASE_URL="${API_BASE_URL:-http://localhost:8080/api}"
 export HTTP_HOST="${HTTP_HOST:-0.0.0.0}"
-export HTTP_PORT="${HTTP_PORT:-8089}"
+export HTTP_PORT="${HTTP_PORT:-8080}"
 export SMTP_HOST="${SMTP_HOST:-0.0.0.0}"
 export SMTP_PORT="${SMTP_PORT:-2525}"
 export SMTP_HOSTNAME="${SMTP_HOSTNAME:-mx.localhost}"

@@ -16,7 +16,20 @@ import (
 )
 
 func Open(databaseURL string) (*gorm.DB, error) {
-	return gorm.Open(postgres.Open(databaseURL), &gorm.Config{})
+	db, err := gorm.Open(postgres.Open(databaseURL), &gorm.Config{})
+	if err != nil {
+		return nil, err
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, err
+	}
+	// Connection pool defaults
+	sqlDB.SetMaxIdleConns(10)
+	sqlDB.SetMaxOpenConns(50)
+	sqlDB.SetConnMaxLifetime(5 * time.Minute)
+	sqlDB.SetConnMaxIdleTime(1 * time.Minute)
+	return db, nil
 }
 
 func AutoMigrate(database *gorm.DB) error {
@@ -24,11 +37,16 @@ func AutoMigrate(database *gorm.DB) error {
 		&User{},
 		&RefreshToken{},
 		&Domain{},
+		&DomainEmailAuth{},
 		&Inbox{},
 		&Email{},
 		&Attachment{},
 		&DomainEvent{},
 		&AuditLog{},
+		&StaticProject{},
+		&ApiKey{},
+		&ApiKeyUsageLog{},
+		&SentEmailLog{},
 	); err != nil {
 		return err
 	}
@@ -83,6 +101,7 @@ func SeedSuperAdmin(ctx context.Context, database *gorm.DB, cfg config.Config) e
 		MaxMessageSizeMB:    cfg.DefaultAdminMaxMessageSizeMB,
 		MaxAttachmentSizeMB: cfg.DefaultAdminMaxAttachmentSizeMB,
 		MaxStorageBytes:     int64(cfg.DefaultAdminMaxStorageGB) * 1024 * 1024 * 1024,
+		MaxWebsites:         cfg.DefaultAdminMaxWebsites,
 	}
 	return database.WithContext(ctx).Create(&user).Error
 }
