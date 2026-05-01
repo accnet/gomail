@@ -12,10 +12,13 @@ const state = {
   domains: [],
   inboxes: [],
   emails: [],
+  emailPagination: null,
   users: [],
   dashboard: null,
   selectedEmailID: null,
-  selectedInboxID: null
+  selectedInboxID: null,
+  emailUnreadOnly: false,
+  emailPage: 1
 };
 
 // --- DOM References ---
@@ -186,6 +189,10 @@ function gb(bytesValue) {
 function storagePercent(user) {
   if (!user.max_storage_bytes) return 0;
   return Math.min(100, Math.round((Number(user.storage_used_bytes || 0) / Number(user.max_storage_bytes)) * 100));
+}
+
+function emailItems(payload) {
+  return Array.isArray(payload) ? payload : (payload?.items || []);
 }
 
 function relative(iso) {
@@ -455,16 +462,16 @@ function connectEvents() {
 // --- Dashboard ---
 async function renderDashboard() {
   setView("dashboard");
-  const [dashboard, domains, inboxes, emails] = await Promise.all([
+  const [dashboard, domains, inboxes, emailsPayload] = await Promise.all([
     api("/dashboard"),
     api("/domains"),
     api("/inboxes"),
-    api("/emails")
+    api("/emails?page=1&page_size=100")
   ]);
   state.dashboard = dashboard;
   state.domains = domains;
   state.inboxes = inboxes;
-  state.emails = emails;
+  state.emails = emailItems(emailsPayload);
 
   const activeDomains = domains.filter((d) => d.status === "verified").length;
   const warningDomains = domains.filter((d) => d.warning_status).length;
@@ -519,7 +526,7 @@ async function renderDashboard() {
           <h3>Recent Intake</h3>
         </div>
         <div class="card-body" style="padding:12px 20px">
-          ${emails.length ? emails.slice(0, 5).map((mail) => `
+          ${state.emails.length ? state.emails.slice(0, 5).map((mail) => `
             <div class="info-row" style="cursor:default">
               <div style="min-width:0;flex:1">
                 <p style="font-size:13px;font-weight:500;color:var(--color-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHTML(mail.subject || "(no subject)")}</p>
@@ -731,23 +738,30 @@ async function submitDomainForm(event) {
 // --- Email ---
 async function renderEmail() {
   setView("email");
-  const [inboxes, emails, domains] = await Promise.all([
+  const query = new URLSearchParams({
+    page: String(state.emailPage),
+    page_size: "25"
+  });
+  if (state.emailUnreadOnly) query.set("unread", "true");
+  if (state.selectedInboxID) query.set("inbox_id", state.selectedInboxID);
+  const [inboxes, emailsPayload, domains] = await Promise.all([
     api("/inboxes"),
-    api("/emails"),
+    api(`/emails?${query.toString()}`),
     api("/domains")
   ]);
   state.inboxes = inboxes;
-  state.emails = emails;
+  state.emails = emailItems(emailsPayload);
+  state.emailPagination = Array.isArray(emailsPayload) ? null : emailsPayload.pagination;
   state.domains = domains;
 
   // Determine selected inbox
   state.selectedInboxID = inboxes.find((i) => i.id === state.selectedInboxID)?.id ||
-    emails.find((m) => m.id === state.selectedEmailID)?.inbox_id ||
+    state.emails.find((m) => m.id === state.selectedEmailID)?.inbox_id ||
     inboxes[0]?.id || null;
 
   const filteredEmails = state.selectedInboxID
-    ? emails.filter((m) => m.inbox_id === state.selectedInboxID)
-    : emails;
+    ? state.emails.filter((m) => m.inbox_id === state.selectedInboxID)
+    : state.emails;
 
   state.selectedEmailID = filteredEmails.find((m) => m.id === state.selectedEmailID)?.id ||
     filteredEmails[0]?.id || null;
@@ -787,9 +801,17 @@ async function renderEmail() {
       <div class="email-panel">
         <div class="email-panel-header">
           <h3>${selectedInbox ? escapeHTML(selectedInbox.address) : "All Mail"}</h3>
-          <p class="sub">${filteredEmails.length} messages</p>
+          <p class="sub">${state.emailPagination?.total ?? filteredEmails.length} messages</p>
         </div>
         <div class="email-panel-body">
+          <div style="display:flex;gap:8px;align-items:center;padding:8px 8px 12px">
+            <button id="toggleUnreadBtn" class="btn btn-secondary btn-xs">${state.emailUnreadOnly ? "Unread only" : "All mail"}</button>
+            <div style="margin-left:auto;display:flex;gap:6px;align-items:center">
+              <button id="prevEmailPageBtn" class="btn btn-secondary btn-xs" ${state.emailPagination?.has_prev ? "" : "disabled"}>Prev</button>
+              <span style="font-size:12px;color:var(--color-text-tertiary)">Page ${state.emailPagination?.page || 1}/${state.emailPagination?.total_pages || 1}</span>
+              <button id="nextEmailPageBtn" class="btn btn-secondary btn-xs" ${state.emailPagination?.has_next ? "" : "disabled"}>Next</button>
+            </div>
+          </div>
           ${filteredEmails.length ? filteredEmails.map((mail) => `
             <button class="email-item ${state.selectedEmailID === mail.id ? "active" : ""}" data-email-id="${mail.id}">
               <div class="email-item-row">
@@ -886,11 +908,28 @@ async function renderEmail() {
     });
   };
 
+  document.getElementById("toggleUnreadBtn").onclick = async () => {
+    state.emailUnreadOnly = !state.emailUnreadOnly;
+    state.emailPage = 1;
+    await renderEmail();
+  };
+  document.getElementById("prevEmailPageBtn").onclick = async () => {
+    if (!state.emailPagination?.has_prev) return;
+    state.emailPage -= 1;
+    await renderEmail();
+  };
+  document.getElementById("nextEmailPageBtn").onclick = async () => {
+    if (!state.emailPagination?.has_next) return;
+    state.emailPage += 1;
+    await renderEmail();
+  };
+
   document.querySelectorAll("[data-mailbox-id]").forEach((button) => {
     button.onclick = async () => {
       state.selectedInboxID = button.dataset.mailboxId;
+      state.emailPage = 1;
       state.selectedEmailID = filteredEmails.find((m) => m.inbox_id === state.selectedInboxID)?.id ||
-        emails.find((m) => m.inbox_id === state.selectedInboxID)?.id || null;
+        state.emails.find((m) => m.inbox_id === state.selectedInboxID)?.id || null;
       await renderEmail();
     };
   });

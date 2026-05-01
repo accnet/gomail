@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"gomail/internal/config"
@@ -19,7 +20,7 @@ func Open(databaseURL string) (*gorm.DB, error) {
 }
 
 func AutoMigrate(database *gorm.DB) error {
-	return database.AutoMigrate(
+	if err := database.AutoMigrate(
 		&User{},
 		&RefreshToken{},
 		&Domain{},
@@ -28,7 +29,33 @@ func AutoMigrate(database *gorm.DB) error {
 		&Attachment{},
 		&DomainEvent{},
 		&AuditLog{},
-	)
+	); err != nil {
+		return err
+	}
+	// Create partial unique indexes for soft-delete support.
+	// These ensure uniqueness only for non-deleted rows, allowing
+	// soft-deleted records with the same email/name/address to coexist.
+	partialIndexes := []struct {
+		table   string
+		name    string
+		columns string
+		where   string
+	}{
+		{"users", "idx_users_email_active", "email", "deleted_at IS NULL"},
+		{"domains", "idx_domains_name_active", "name", "deleted_at IS NULL"},
+		{"inboxes", "idx_inboxes_address_active", "address", "deleted_at IS NULL"},
+		{"inboxes", "idx_domain_local_active", "domain_id, local_part", "deleted_at IS NULL"},
+	}
+	for _, idx := range partialIndexes {
+		stmt := fmt.Sprintf(
+			"CREATE UNIQUE INDEX IF NOT EXISTS %s ON %s (%s) WHERE %s",
+			idx.name, idx.table, idx.columns, idx.where,
+		)
+		if err := database.Exec(stmt).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func SeedSuperAdmin(ctx context.Context, database *gorm.DB, cfg config.Config) error {

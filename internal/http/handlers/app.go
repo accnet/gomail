@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/mail"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -94,8 +96,12 @@ func (a App) register(c *gin.Context) {
 	if !bind(c, &req) {
 		return
 	}
-	if len(req.Password) < 8 || !strings.Contains(req.Email, "@") {
-		response.Error(c, http.StatusBadRequest, "invalid_input", "valid email and password length >= 8 required")
+	if len(req.Password) < 8 {
+		response.Error(c, http.StatusBadRequest, "invalid_input", "password length >= 8 required")
+		return
+	}
+	if _, err := mail.ParseAddress(req.Email); err != nil {
+		response.Error(c, http.StatusBadRequest, "invalid_input", "valid email required")
 		return
 	}
 	hash, err := auth.HashPassword(req.Password)
@@ -334,12 +340,64 @@ func (a App) listEmails(c *gin.Context) {
 	if inbox := c.Query("inbox_id"); inbox != "" {
 		q = q.Where("emails.inbox_id = ?", inbox)
 	}
-	if unread := c.Query("unread"); unread == "true" {
-		q = q.Where("emails.is_read = false")
+	if unread := c.Query("unread"); unread != "" {
+		switch unread {
+		case "true":
+			q = q.Where("emails.is_read = false")
+		case "false":
+			q = q.Where("emails.is_read = true")
+		default:
+			response.Error(c, http.StatusBadRequest, "invalid_query", "unread must be true or false")
+			return
+		}
+	}
+	pageSize := 25
+	if raw := c.DefaultQuery("page_size", "25"); raw != "" {
+		var err error
+		pageSize, err = parsePositiveInt(raw, 25, 100)
+		if err != nil {
+			response.Error(c, http.StatusBadRequest, "invalid_query", "page_size must be between 1 and 100")
+			return
+		}
+	}
+	page := 1
+	if raw := c.DefaultQuery("page", "1"); raw != "" {
+		var err error
+		page, err = parsePositiveInt(raw, 1, 1000000)
+		if err != nil {
+			response.Error(c, http.StatusBadRequest, "invalid_query", "page must be >= 1")
+			return
+		}
+	}
+	var total int64
+	if err := q.Model(&db.Email{}).Count(&total).Error; err != nil {
+		response.Error(c, http.StatusInternalServerError, "email_list_failed", "could not load emails")
+		return
 	}
 	var rows []db.Email
-	q.Omit("TextBody", "HTMLBody", "HTMLBodySanitized", "HeadersJSON").Order("emails.received_at desc").Limit(100).Find(&rows)
-	response.OK(c, rows)
+	if err := q.Omit("TextBody", "HTMLBody", "HTMLBodySanitized", "HeadersJSON").
+		Order("emails.received_at desc").
+		Limit(pageSize).
+		Offset((page - 1) * pageSize).
+		Find(&rows).Error; err != nil {
+		response.Error(c, http.StatusInternalServerError, "email_list_failed", "could not load emails")
+		return
+	}
+	totalPages := 0
+	if total > 0 {
+		totalPages = int((total + int64(pageSize) - 1) / int64(pageSize))
+	}
+	response.OK(c, gin.H{
+		"items": rows,
+		"pagination": gin.H{
+			"page":        page,
+			"page_size":   pageSize,
+			"total":       total,
+			"total_pages": totalPages,
+			"has_prev":    page > 1,
+			"has_next":    page < totalPages,
+		},
+	})
 }
 
 func (a App) getEmail(c *gin.Context) {
@@ -391,6 +449,10 @@ func (a App) dashboard(c *gin.Context) {
 
 func (a App) events(c *gin.Context) {
 	user := mw.CurrentUser(c)
+	if a.Redis == nil {
+		response.Error(c, http.StatusServiceUnavailable, "redis_unavailable", "realtime events not available")
+		return
+	}
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
@@ -443,10 +505,13 @@ func (a App) adminUserStatus(c *gin.Context) {
 		response.Error(c, http.StatusNotFound, "not_found", "user not found")
 		return
 	}
+	payload, _ := json.Marshal(gin.H{"user_id": c.Param("id"), "is_active": req.IsActive})
+	_ = a.DB.Create(&db.AuditLog{ActorID: &current.ID, Type: "user.status", Payload: payload}).Error
 	response.OK(c, gin.H{"ok": true})
 }
 
 func (a App) adminUserQuotas(c *gin.Context) {
+	current := mw.CurrentUser(c)
 	var req struct {
 		MaxDomains          *int   `json:"max_domains"`
 		MaxInboxes          *int   `json:"max_inboxes"`
@@ -506,6 +571,8 @@ func (a App) adminUserQuotas(c *gin.Context) {
 		response.Error(c, http.StatusNotFound, "not_found", "user not found")
 		return
 	}
+	payload, _ := json.Marshal(gin.H{"user_id": c.Param("id"), "updates": updates})
+	_ = a.DB.Create(&db.AuditLog{ActorID: &current.ID, Type: "user.quota", Payload: payload}).Error
 	response.OK(c, gin.H{"ok": true})
 }
 
@@ -647,6 +714,14 @@ func ownerFirst(database *gorm.DB, id string, userID uuid.UUID, dest any) error 
 		return err
 	}
 	return err
+}
+
+func parsePositiveInt(raw string, min int, max int) (int, error) {
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < min || n > max {
+		return 0, errors.New("invalid int")
+	}
+	return n, nil
 }
 
 func BackgroundDomainRecheck(ctx context.Context, database *gorm.DB, verifier dns.Verifier, every time.Duration) {

@@ -29,13 +29,17 @@ func (b Backend) NewSession(conn *smtp.Conn) (smtp.Session, error) {
 	return &Session{backend: b, remote: conn.Conn().RemoteAddr().String()}, nil
 }
 
+type recipient struct {
+	address string
+	inbox   db.Inbox
+	user    db.User
+}
+
 type Session struct {
 	backend Backend
 	remote  string
 	from    string
-	rcpt    string
-	inbox   db.Inbox
-	user    db.User
+	rcpts   []recipient
 }
 
 func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
@@ -64,17 +68,20 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 	if err := s.backend.DB.First(&user, "id = ? AND is_active = ?", inbox.UserID, true).Error; err != nil {
 		return &smtp.SMTPError{Code: 550, Message: "mailbox unavailable"}
 	}
-	s.rcpt = addr.Address
-	s.inbox = inbox
-	s.user = user
+	s.rcpts = append(s.rcpts, recipient{
+		address: addr.Address,
+		inbox:   inbox,
+		user:    user,
+	})
 	return nil
 }
 
 func (s *Session) Data(r io.Reader) error {
-	if s.inbox.ID.String() == "" {
+	if len(s.rcpts) == 0 {
 		return &smtp.SMTPError{Code: 550, Message: "mailbox unavailable"}
 	}
-	limit := int64(s.user.MaxMessageSizeMB)*1024*1024 + 1
+	// Use the first recipient's user for message size limit (all recipients share the same message)
+	limit := int64(s.rcpts[0].user.MaxMessageSizeMB)*1024*1024 + 1
 	raw, err := io.ReadAll(io.LimitReader(r, limit))
 	if err != nil {
 		return err
@@ -82,12 +89,19 @@ func (s *Session) Data(r io.Reader) error {
 	if int64(len(raw)) >= limit {
 		return &smtp.SMTPError{Code: 552, Message: "message size limit exceeded"}
 	}
-	_, err = s.backend.Pipeline.Ingest(context.Background(), s.inbox, s.user, s.from, s.rcpt, raw)
-	if err != nil {
-		if strings.Contains(err.Error(), "quota") || strings.Contains(err.Error(), "limit") {
-			return &smtp.SMTPError{Code: 552, Message: err.Error()}
+	// Deliver to each recipient
+	var lastErr error
+	for _, rcpt := range s.rcpts {
+		_, err = s.backend.Pipeline.Ingest(context.Background(), rcpt.inbox, rcpt.user, s.from, rcpt.address, raw)
+		if err != nil {
+			lastErr = err
+			s.backend.Logger.Error("smtp ingest failed for recipient", "error", err, "remote", s.remote, "recipient", rcpt.address)
 		}
-		s.backend.Logger.Error("smtp ingest failed", "error", err, "remote", s.remote)
+	}
+	if lastErr != nil {
+		if strings.Contains(lastErr.Error(), "quota") || strings.Contains(lastErr.Error(), "limit") {
+			return &smtp.SMTPError{Code: 552, Message: lastErr.Error()}
+		}
 		return &smtp.SMTPError{Code: 451, Message: "temporary local error"}
 	}
 	return nil
@@ -95,9 +109,7 @@ func (s *Session) Data(r io.Reader) error {
 
 func (s *Session) Reset() {
 	s.from = ""
-	s.rcpt = ""
-	s.inbox = db.Inbox{}
-	s.user = db.User{}
+	s.rcpts = nil
 }
 
 func (s *Session) Logout() error { return nil }
