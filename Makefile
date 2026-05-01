@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: test vet check dev-up dev-down api smtp
+.PHONY: test vet check dev-up dev-down api smtp e2e
 
 test:
 	go test ./...
@@ -23,3 +23,6 @@ api:
 
 smtp:
 	go run ./cmd/smtp
+
+e2e:
+	bash scripts/manual_e2e.sh

@@ -354,7 +354,7 @@ func (a App) listEmails(c *gin.Context) {
 	pageSize := 25
 	if raw := c.DefaultQuery("page_size", "25"); raw != "" {
 		var err error
-		pageSize, err = parsePositiveInt(raw, 25, 100)
+		pageSize, err = parsePositiveInt(raw, 1, 100)
 		if err != nil {
 			response.Error(c, http.StatusBadRequest, "invalid_query", "page_size must be between 1 and 100")
 			return
@@ -456,9 +456,14 @@ func (a App) events(c *gin.Context) {
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
+	c.Status(http.StatusOK)
+	c.Writer.Flush()
 	pubsub := a.Redis.Subscribe(c.Request.Context(), realtime.Channel)
 	defer pubsub.Close()
 	writer := bufio.NewWriter(c.Writer)
+	fmt.Fprint(writer, ": connected\n\n")
+	writer.Flush()
+	c.Writer.Flush()
 	ch := pubsub.Channel()
 	for {
 		select {
@@ -732,22 +737,26 @@ func BackgroundDomainRecheck(ctx context.Context, database *gorm.DB, verifier dn
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			var domains []db.Domain
-			database.Where("status IN ?", []string{"pending", "verified"}).Find(&domains)
-			for _, domain := range domains {
-				ok, msg := verifier.Verify(ctx, domain.Name)
-				now := time.Now()
-				updates := map[string]any{"last_verified_at": &now, "verification_error": msg}
-				if ok {
-					updates["status"] = "verified"
-					updates["warning_status"] = ""
-				} else if domain.Status == "verified" {
-					updates["warning_status"] = "verified_warning"
-				} else {
-					updates["status"] = "failed"
-				}
-				database.Model(&domain).Updates(updates)
-			}
+			recheckDomainsOnce(ctx, database, verifier)
 		}
+	}
+}
+
+func recheckDomainsOnce(ctx context.Context, database *gorm.DB, verifier dns.Verifier) {
+	var domains []db.Domain
+	database.Where("status IN ?", []string{"pending", "verified"}).Find(&domains)
+	for _, domain := range domains {
+		ok, msg := verifier.Verify(ctx, domain.Name)
+		now := time.Now()
+		updates := map[string]any{"last_verified_at": &now, "verification_error": msg}
+		if ok {
+			updates["status"] = "verified"
+			updates["warning_status"] = ""
+		} else if domain.Status == "verified" {
+			updates["warning_status"] = "verified_warning"
+		} else {
+			updates["status"] = "failed"
+		}
+		database.Model(&domain).Updates(updates)
 	}
 }

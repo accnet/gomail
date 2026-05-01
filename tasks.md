@@ -182,7 +182,7 @@ Definition of done:
 - [ ] Lưu raw `.eml` vào local storage cho từng email V1.
 - [ ] Cleanup raw `.eml` nếu persist DB hoặc attachment pipeline thất bại.
 - [ ] Publish domain/mail lifecycle log với internal message ID.
-- [ ] Viết integration test gửi mail mẫu qua SMTP vào DB.
+- [x] Viết integration test gửi mail mẫu qua SMTP vào DB.
 
 Definition of done:
 
@@ -210,18 +210,18 @@ Definition of done:
 - [ ] Download API phải lookup DB, check owner, check block policy, và từ chối attachment blocked nếu không có admin override.
 - [ ] Implement admin override flow cho attachment blocked nếu policy UI/API cần mở khóa có kiểm soát.
 - [ ] Viết unit test filename sanitizer và scanner.
-- [ ] Viết integration test mail có attachment.
+- [x] Viết integration test mail có attachment.
 
 Definition of done:
 
 - [ ] Attachment hợp lệ lưu và tải lại được.
 - [ ] Path traversal không thể xảy ra qua filename.
-- [ ] Attachment bị block không download công khai được.
-- [ ] Attachment flagged mặc định không download trực tiếp được.
+- [x] Attachment bị block không download công khai được.
+- [x] Attachment flagged mặc định không download trực tiếp được.
 
 ## Milestone 8: Email Read API and Metrics
 
-- [ ] Implement `GET /api/emails` với filter inbox, unread/read, pagination.
+- [x] Implement `GET /api/emails` với filter inbox, unread/read, pagination.
 - [ ] Implement `GET /api/emails/:id`.
 - [ ] Implement `PATCH /api/emails/:id/read`.
 - [ ] Implement soft delete email endpoint hoặc behavior cho delete email nếu UI cần.
@@ -246,14 +246,14 @@ Definition of done:
 - [x] Implement Redis publisher cho `domain.verified`.
 - [ ] Implement SSE endpoint `GET /api/events/stream`.
 - [ ] Auth SSE bằng access token hoặc cookie theo frontend strategy.
-- [ ] Fanout event theo user, không leak event giữa users.
+- [x] Fanout event theo user, không leak event giữa users.
 - [ ] Reconnect handling cho SSE.
-- [ ] Viết integration test publish event tới SSE client.
+- [x] Viết integration test publish event tới SSE client.
 
 Definition of done:
 
 - [ ] Khi SMTP persist mail thành công, UI/client nhận được `mail.received`.
-- [ ] SSE không gửi event của user khác.
+- [x] SSE không gửi event của user khác.
 
 ## Milestone 10: Frontend V1
 
@@ -272,10 +272,10 @@ Definition of done:
 - [ ] Verify lại domain từ Actions.
 - [ ] Emails view có cột inbox/address.
 - [ ] Tạo inbox từ các domain đã verified.
-- [ ] Filter unread.
+- [x] Filter unread.
 - [ ] Email list và email detail.
 - [ ] Render HTML chỉ từ `html_body_sanitized`.
-- [ ] Không tự động load remote images trong email viewer.
+- [x] Không tự động load remote images trong email viewer.
 - [ ] Attachment download và cảnh báo blocked/flagged.
 - [ ] Disable nút download cho attachment blocked/flagged nếu user thường không có quyền override.
 - [ ] Hiển thị badge SPF, DKIM, DMARC.
@@ -297,14 +297,14 @@ Definition of done:
 - [ ] Quota API phải cho super admin cấu hình tổng dung lượng storage theo user.
 - [ ] Phân quyền super admin cho các thao tác quota nhạy cảm nếu khác admin thường.
 - [ ] Implement admin override cho attachment blocked/flagged nếu được bật trong policy.
-- [ ] Ghi audit log khi toggle active hoặc đổi quota.
+- [x] Ghi audit log khi toggle active hoặc đổi quota.
 - [x] Admin UI list user.
 - [x] Admin UI toggle active.
 - [x] Admin UI update quota, bao gồm quota tổng storage.
 - [x] Admin UI override attachment blocked/flagged nếu policy bật.
 - [x] SMTP RCPT phải từ chối mail cho user bị disable.
 - [x] Login phải chặn user bị disable.
-- [ ] Viết integration test admin authorization.
+- [x] Viết integration test admin authorization.
 
 Definition of done:
 
@@ -322,7 +322,7 @@ Definition of done:
 - [x] Add Makefile hoặc task runner cho build/test/migrate.
 - [ ] Add CI workflow nếu repo dùng GitHub.
 - [x] Add README dev setup.
-- [ ] Add manual E2E script:
+- [x] Add manual E2E script:
   - tạo user
   - thêm domain
   - verify domain
@@ -341,12 +341,12 @@ Definition of done:
 - [ ] Unit: parser service.
 - [ ] Unit: HTML sanitization service.
 - [ ] Unit: attachment scan classifier.
-- [ ] Integration: DB migration.
-- [ ] Integration: API auth/domain/inbox/email.
+- [x] Integration: DB migration.
+- [x] Integration: API auth/domain/inbox/email.
 - [ ] Integration: SMTP receive -> DB persist -> Redis publish.
-- [ ] Integration: domain verification background job.
-- [ ] Integration: attachment scan pipeline.
-- [ ] Manual E2E: full user flow from register to reading inbound mail.
+- [x] Integration: domain verification background job.
+- [x] Integration: attachment scan pipeline.
+- [x] Manual E2E: full user flow from register to reading inbound mail.
 
 ## First Implementation Sprint
 

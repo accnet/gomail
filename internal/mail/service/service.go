@@ -9,6 +9,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/mail"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/microcosm-cc/bluemonday"
+	"golang.org/x/net/html"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
@@ -53,7 +55,7 @@ func (p Pipeline) Ingest(ctx context.Context, inbox db.Inbox, user db.User, from
 		Snippet:           snippet(parsed.Text),
 		TextBody:          parsed.Text,
 		HTMLBody:          parsed.HTML,
-		HTMLBodySanitized: bluemonday.UGCPolicy().Sanitize(parsed.HTML),
+		HTMLBodySanitized: sanitizeHTML(parsed.HTML),
 		HeadersJSON:       mustJSON(parsed.Headers),
 		AuthResultsJSON:   mustJSON(authResults(parsed.Headers)),
 	}
@@ -229,6 +231,80 @@ func authResults(headers map[string][]string) map[string][]string {
 		}
 	}
 	return out
+}
+
+func sanitizeHTML(raw string) string {
+	policy := bluemonday.UGCPolicy()
+	policy.AllowURLSchemes("cid", "data")
+	clean := policy.Sanitize(raw)
+	if clean == "" {
+		return clean
+	}
+	doc, err := html.Parse(strings.NewReader(clean))
+	if err != nil {
+		return clean
+	}
+	scrubRemoteImages(doc)
+	var out bytes.Buffer
+	if err := html.Render(&out, doc); err != nil {
+		return clean
+	}
+	return out.String()
+}
+
+func scrubRemoteImages(n *html.Node) {
+	if n.Type == html.ElementNode && n.Data == "img" {
+		var kept []html.Attribute
+		for _, attr := range n.Attr {
+			switch strings.ToLower(attr.Key) {
+			case "src":
+				if isSafeImageSource(attr.Val) {
+					kept = append(kept, attr)
+				}
+			case "srcset":
+				if filtered := filterSafeSrcset(attr.Val); filtered != "" {
+					attr.Val = filtered
+					kept = append(kept, attr)
+				}
+			default:
+				kept = append(kept, attr)
+			}
+		}
+		n.Attr = kept
+	}
+	for child := n.FirstChild; child != nil; child = child.NextSibling {
+		scrubRemoteImages(child)
+	}
+}
+
+func isSafeImageSource(src string) bool {
+	value := strings.TrimSpace(strings.ToLower(src))
+	if value == "" {
+		return false
+	}
+	if strings.HasPrefix(value, "cid:") || strings.HasPrefix(value, "data:image/") {
+		return true
+	}
+	if strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://") || strings.HasPrefix(value, "//") {
+		return false
+	}
+	u, err := url.Parse(value)
+	return err == nil && u.Scheme == "" && u.Host == ""
+}
+
+func filterSafeSrcset(srcset string) string {
+	var safe []string
+	for _, part := range strings.Split(srcset, ",") {
+		fields := strings.Fields(strings.TrimSpace(part))
+		if len(fields) == 0 {
+			continue
+		}
+		if !isSafeImageSource(fields[0]) {
+			continue
+		}
+		safe = append(safe, strings.Join(fields, " "))
+	}
+	return strings.Join(safe, ", ")
 }
 
 func snippet(s string) string {

@@ -33,10 +33,13 @@ make dev-up    # start Postgres and Redis
 make api       # run the HTTP API
 make smtp      # run the SMTP server
 make check     # go test, go vet, and JS syntax checks
+make e2e       # local manual E2E flow via API + SMTP
 make dev-down  # stop local services
 ```
 
 In development, demo data is seeded by default for the super admin account. Set `SEED_DEMO_DATA=false` to disable it.
+
+`make e2e` assumes the local Docker Postgres container is `gomail-postgres-1` and uses a local-only shortcut to mark the created domain as verified in the database before sending a test mail to SMTP.
 
 For VPS deploy, set `SMTP_PORT=25`, open port 25 in the firewall/provider security group, and point `MX_TARGET` to the public SMTP hostname, for example `mx.example.com`.
 
