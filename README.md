@@ -59,6 +59,81 @@ Local dev API runs on `http://localhost:8080` by default.
 
 Production deploys should use `.env`.
 
+## VPS Production Install
+
+The repository now includes [install.sh](./install.sh) for first-time VPS setup on Ubuntu/Debian. It installs Docker, Go, nginx, ufw, builds the GoMail binaries, provisions `systemd` services, and writes an nginx reverse proxy for the main SaaS domain.
+
+Run it as root from the repository checkout:
+
+```sh
+sudo APP_DOMAIN=mail.example.com \
+  SAAS_DOMAIN=example.com \
+  SMTP_HOSTNAME=mx.example.com \
+  SMTP_AUTH_HOSTNAME=smtp.example.com \
+  DEFAULT_ADMIN_EMAIL=admin@example.com \
+  ./install.sh
+```
+
+The script prompts for any missing secrets and now attempts a Let's Encrypt certificate for the primary app domain by default. Use `ENABLE_TLS=false` to skip TLS during first install, or `ENABLE_TLS=true` to require certificate provisioning success.
+
+If you want hosted static sites to live under a different wildcard base domain than the main SaaS domain, set `STATIC_SITES_BASE_DOMAIN` separately when running the installer. Example: app on `example.com`, hosted sites on `*.sites.example.net`.
+
+```sh
+sudo APP_DOMAIN=example.com \
+  SAAS_DOMAIN=example.com \
+  STATIC_SITES_BASE_DOMAIN=sites.example.net \
+  SMTP_HOSTNAME=mx.example.com \
+  SMTP_AUTH_HOSTNAME=smtp.example.com \
+  DEFAULT_ADMIN_EMAIL=admin@example.com \
+  ./install.sh
+```
+
+This nginx-based install covers the main app domain and routes all other HTTP hosts to `static-server`, which is enough for HTTP custom domains and hosted subdomains.
+
+For wildcard HTTPS on hosted static sites, use [wildcard-ssl.sh](./wildcard-ssl.sh). It supports two modes:
+
+1. Install an existing wildcard certificate you already issued elsewhere.
+2. Automatically request a wildcard certificate through Cloudflare DNS-01 and then apply it to nginx.
+
+Existing certificate mode:
+
+```sh
+sudo STATIC_SITES_BASE_DOMAIN=sites.example.net \
+  WILDCARD_SSL_MODE=existing \
+  WILDCARD_CERT_FILE=/root/certs/sites.example.net.fullchain.pem \
+  WILDCARD_KEY_FILE=/root/certs/sites.example.net.key \
+  ./wildcard-ssl.sh
+```
+
+Cloudflare auto-issue mode:
+
+```sh
+sudo STATIC_SITES_BASE_DOMAIN=sites.example.net \
+  WILDCARD_SSL_MODE=cloudflare \
+  CF_API_TOKEN=your_cloudflare_dns_token \
+  ./wildcard-ssl.sh
+```
+
+This script enables nginx HTTPS for `*.STATIC_SITES_BASE_DOMAIN` and redirects wildcard HTTP traffic to HTTPS. The `cloudflare` mode installs `python3-certbot-dns-cloudflare` if needed, requests a certificate for both `STATIC_SITES_BASE_DOMAIN` and `*.STATIC_SITES_BASE_DOMAIN`, then wires it into nginx.
+
+For later code updates on the VPS, use [upgrade.sh](./upgrade.sh). It syncs the new checkout into the deployed app directory, rebuilds binaries, refreshes Docker infra, restarts the `systemd` services, and verifies local health checks.
+
+```sh
+sudo ./upgrade.sh
+```
+
+Set `RUN_TESTS=true` if you want `go test ./...` before the restart, or `RESTART_INFRA=true` if you want a full `gomail-infra.service` restart instead of `docker compose up -d`.
+
+If the main SaaS domain certificate was issued incorrectly or DNS was fixed later, use [ssl-fix.sh](./ssl-fix.sh) to request the certificate again without rerunning the full install:
+
+```sh
+sudo ./ssl-fix.sh
+```
+
+It reads `APP_DOMAIN` and `DEFAULT_ADMIN_EMAIL` from `/opt/gomail/.env` by default. Set `DELETE_OLD_CERT=true` if you want to remove the old certificate lineage before requesting a fresh one.
+
+If you need to reapply or rotate the wildcard certificate used by hosted sites, rerun [wildcard-ssl.sh](./wildcard-ssl.sh) with either updated certificate/key file paths or the same Cloudflare token.
+
 ## Developer Commands
 
 ```sh
