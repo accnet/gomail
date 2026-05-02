@@ -1605,7 +1605,7 @@ tbody tr:hover {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 14px;
+  padding: 0;
   background: var(--color-surface-hover);
   border-radius: var(--radius-md);
   margin-bottom: 6px;
@@ -1919,7 +1919,7 @@ tbody tr:hover {
 
 .modal {
   width: 100%;
-  max-width: 440px;
+  max-width: 540px;
   background: var(--color-card-bg);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-xl);
