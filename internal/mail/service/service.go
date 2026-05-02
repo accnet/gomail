@@ -51,8 +51,8 @@ func (p Pipeline) Ingest(ctx context.Context, inbox db.Inbox, user db.User, from
 		ToAddress:         firstNonEmpty(parsed.To, rcpt),
 		Subject:           parsed.Subject,
 		ReceivedAt:        time.Now(),
-		RawSizeBytes:      int64(len(raw)),
 		Snippet:           snippet(parsed.Text),
+
 		TextBody:          parsed.Text,
 		HTMLBody:          parsed.HTML,
 		HTMLBodySanitized: sanitizeHTML(parsed.HTML),

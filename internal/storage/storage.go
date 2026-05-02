@@ -16,28 +16,16 @@ import (
 
 type Local struct {
 	AttachmentRoot string
-	RawRoot        string
 }
 
-func NewLocal(attachmentRoot, rawRoot string) *Local {
-	return &Local{AttachmentRoot: attachmentRoot, RawRoot: rawRoot}
+func NewLocal(attachmentRoot string) *Local {
+	return &Local{AttachmentRoot: attachmentRoot}
 }
 
 func (s *Local) Ensure() error {
-	if err := os.MkdirAll(s.AttachmentRoot, 0o755); err != nil {
-		return err
-	}
-	return os.MkdirAll(s.RawRoot, 0o755)
+	return os.MkdirAll(s.AttachmentRoot, 0o755)
 }
 
-func (s *Local) SaveRaw(userID, emailID uuid.UUID, data []byte) (string, error) {
-	dir := filepath.Join(s.RawRoot, userID.String(), emailID.String())
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
-	path := filepath.Join(dir, "message.eml")
-	return path, os.WriteFile(path, data, 0o640)
-}
 
 func (s *Local) SaveAttachment(userID, emailID, attachmentID uuid.UUID, filename string, r io.Reader) (path string, sha string, size int64, sniffed string, err error) {
 	dir := filepath.Join(s.AttachmentRoot, userID.String(), emailID.String())

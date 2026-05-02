@@ -32,7 +32,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	store := storage.NewLocal(cfg.AttachmentStorageRoot, cfg.RawEmailStorageRoot)
+	store := storage.NewLocal(cfg.AttachmentStorageRoot)
 	if err := store.Ensure(); err != nil {
 		log.Fatal(err)
 	}

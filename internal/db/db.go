@@ -168,30 +168,29 @@ func SeedDemoData(ctx context.Context, database *gorm.DB, cfg config.Config) err
 		demoEmail(inboxes[1].ID, "<demo-support@gomail.local>", "customer@example.net", "support@site2.localhost", "Question about inbound routing", "Can you confirm this mailbox receives support tickets?", "Can you confirm this mailbox receives support tickets from external senders?", now.Add(-5*time.Hour), false),
 		demoEmail(inboxes[1].ID, "<demo-report@gomail.local>", "reports@example.net", "support@site2.localhost", "Daily delivery summary", "All test messages were accepted successfully.", "All test messages were accepted successfully. No blocked attachments were found.", now.Add(-26*time.Hour), true),
 	}
-	var used int64
 	return database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		for i := range emails {
-			used += emails[i].RawSizeBytes
 			if err := tx.Create(&emails[i]).Error; err != nil {
 				return err
 			}
 		}
-		return tx.Model(&User{}).Where("id = ?", user.ID).Update("storage_used_bytes", gorm.Expr("storage_used_bytes + ?", used)).Error
+		return nil
 	})
+
 }
 
 func demoEmail(inboxID uuid.UUID, messageID, from, to, subject, snippetText, body string, receivedAt time.Time, read bool) Email {
 	html := "<p>" + body + "</p>"
-	size := int64(len(body) + len(subject) + len(from) + len(to) + 160)
 	return Email{
+
 		InboxID:           inboxID,
 		MessageID:         messageID,
 		FromAddress:       from,
 		ToAddress:         to,
 		Subject:           subject,
 		ReceivedAt:        receivedAt,
-		RawSizeBytes:      size,
 		Snippet:           snippetText,
+
 		TextBody:          body,
 		HTMLBody:          html,
 		HTMLBodySanitized: html,

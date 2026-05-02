@@ -185,9 +185,8 @@ type Email struct {
 	ToAddress         string         `json:"to_address"`
 	Subject           string         `json:"subject"`
 	ReceivedAt        time.Time      `gorm:"index" json:"received_at"`
-	RawSizeBytes      int64          `json:"raw_size_bytes"`
-	RawStoragePath    string         `json:"-"`
 	Snippet           string         `json:"snippet"`
+
 	TextBody          string         `json:"text_body,omitempty"`
 	HTMLBody          string         `json:"-"`
 	HTMLBodySanitized string         `json:"html_body_sanitized,omitempty"`

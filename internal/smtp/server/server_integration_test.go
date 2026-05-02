@@ -40,7 +40,7 @@ func TestSessionPersistsMailAndRejectsInactiveUser(t *testing.T) {
 		RawEmailStorageRoot:   t.TempDir() + "/raw",
 		AttachmentStorageRoot: t.TempDir() + "/att",
 	}
-	store := storage.NewLocal(cfg.AttachmentStorageRoot, cfg.RawEmailStorageRoot)
+	store := storage.NewLocal(cfg.AttachmentStorageRoot)
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}
