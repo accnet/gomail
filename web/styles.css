@@ -1757,8 +1757,9 @@ tbody tr:hover {
 .domain-actions {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: center;
 }
+
 
 .action-dots {
   position: relative;
