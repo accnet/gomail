@@ -53,7 +53,11 @@ func main() {
 
 	redisClient := realtime.NewRedis(cfg.RedisAddr, cfg.RedisPass, cfg.RedisDB)
 	authSvc := auth.NewService(database, cfg)
-	verifier := dns.Verifier{Timeout: cfg.DomainVerifyTimeout, MXTarget: cfg.MXTarget}
+	verifier := dns.Verifier{
+		Timeout:  cfg.DomainVerifyTimeout,
+		MXTarget: cfg.MXTarget,
+		Resolver: dns.NewNetResolver(cfg.DomainDNSResolvers),
+	}
 
 	go handlers.BackgroundDomainRecheck(ctx, database, verifier, cfg, cfg.DomainRecheckEvery)
 

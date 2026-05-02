@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -53,6 +54,7 @@ type Config struct {
 
 	DomainVerifyTimeout time.Duration
 	DomainRecheckEvery  time.Duration
+	DomainDNSResolvers  []string
 	BlockFlagged        bool
 	AllowAdminOverride  bool
 	MaxMessageSizeMB    int
@@ -100,8 +102,14 @@ func Load() (Config, error) {
 		}
 	}
 
+	appEnv := env("APP_ENV", "development")
+	domainDNSResolvers := parseDNSResolverAddrs(os.Getenv("DOMAIN_DNS_RESOLVERS"))
+	if len(domainDNSResolvers) == 0 {
+		domainDNSResolvers = defaultDomainDNSResolvers(appEnv)
+	}
+
 	cfg := Config{
-		AppEnv:                          env("APP_ENV", "development"),
+		AppEnv:                          appEnv,
 		AppName:                         env("APP_NAME", "GoMail"),
 		AppBaseURL:                      env("APP_BASE_URL", "http://localhost:8080"),
 		APIBaseURL:                      env("API_BASE_URL", "http://localhost:8080/api"),
@@ -134,6 +142,7 @@ func Load() (Config, error) {
 		StaticSitesRoot:                 env("STATIC_SITES_ROOT", "./data/static-sites"),
 		DomainVerifyTimeout:             time.Duration(envInt("DOMAIN_VERIFY_TIMEOUT_SECONDS", 10)) * time.Second,
 		DomainRecheckEvery:              time.Duration(envInt("DOMAIN_RECHECK_INTERVAL_MINUTES", 30)) * time.Minute,
+		DomainDNSResolvers:              domainDNSResolvers,
 		BlockFlagged:                    envBool("BLOCK_FLAGGED_ATTACHMENTS", true),
 		AllowAdminOverride:              envBool("ALLOW_ADMIN_ATTACHMENT_OVERRIDE", true),
 		MaxMessageSizeMB:                envInt("MAX_MESSAGE_SIZE_MB", 25),
@@ -196,6 +205,11 @@ func (c Config) Validate() error {
 	if len(missing) > 0 {
 		return fmt.Errorf("missing required env: %s", strings.Join(missing, ", "))
 	}
+	for _, resolver := range c.DomainDNSResolvers {
+		if _, _, err := net.SplitHostPort(resolver); err != nil {
+			return fmt.Errorf("invalid DOMAIN_DNS_RESOLVERS entry %q: %w", resolver, err)
+		}
+	}
 	if _, err := url.ParseRequestURI(c.AppBaseURL); err != nil {
 		return fmt.Errorf("invalid APP_BASE_URL: %w", err)
 	}
@@ -257,4 +271,33 @@ func envBool(key string, fallback bool) bool {
 	default:
 		return fallback
 	}
+}
+
+func defaultDomainDNSResolvers(appEnv string) []string {
+	if strings.EqualFold(strings.TrimSpace(appEnv), "production") {
+		return []string{"1.1.1.1:53", "8.8.8.8:53"}
+	}
+	return nil
+}
+
+func parseDNSResolverAddrs(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	resolvers := make([]string, 0, len(parts))
+	for _, part := range parts {
+		resolver := strings.TrimSpace(part)
+		if resolver == "" {
+			continue
+		}
+		if _, _, err := net.SplitHostPort(resolver); err != nil {
+			resolver = net.JoinHostPort(resolver, "53")
+		}
+		resolvers = append(resolvers, resolver)
+	}
+	if len(resolvers) == 0 {
+		return nil
+	}
+	return resolvers
 }

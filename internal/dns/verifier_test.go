@@ -3,6 +3,7 @@ package dns
 import (
 	"context"
 	"net"
+	"reflect"
 	"testing"
 )
 
@@ -79,5 +80,13 @@ func TestVerifierChecksDKIMPublicKey(t *testing.T) {
 	ok, msg := v.VerifyDKIM(context.Background(), "gomail._domainkey.example.com", "abc123")
 	if !ok || msg != "" {
 		t.Fatalf("expected DKIM verify ok, got ok=%v msg=%q", ok, msg)
+	}
+}
+
+func TestNewNetResolverNormalizesServers(t *testing.T) {
+	resolver := NewNetResolver([]string{"1.1.1.1", " 8.8.8.8:5353 ", ""})
+	want := []string{"1.1.1.1:53", "8.8.8.8:5353"}
+	if !reflect.DeepEqual(resolver.Servers, want) {
+		t.Fatalf("Servers = %v want %v", resolver.Servers, want)
 	}
 }

@@ -2,6 +2,7 @@ package dns
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/netip"
 	"strings"
@@ -14,18 +15,90 @@ type Resolver interface {
 	LookupIPAddr(ctx context.Context, name string) ([]net.IPAddr, error)
 }
 
-type NetResolver struct{}
-
-func (NetResolver) LookupMX(ctx context.Context, name string) ([]*net.MX, error) {
-	return net.DefaultResolver.LookupMX(ctx, name)
+type NetResolver struct {
+	Servers []string
 }
 
-func (NetResolver) LookupTXT(ctx context.Context, name string) ([]string, error) {
-	return net.DefaultResolver.LookupTXT(ctx, name)
+func NewNetResolver(servers []string) NetResolver {
+	cleaned := make([]string, 0, len(servers))
+	for _, server := range servers {
+		server = strings.TrimSpace(server)
+		if server == "" {
+			continue
+		}
+		if _, _, err := net.SplitHostPort(server); err != nil {
+			server = net.JoinHostPort(server, "53")
+		}
+		cleaned = append(cleaned, server)
+	}
+	return NetResolver{Servers: cleaned}
 }
 
-func (NetResolver) LookupIPAddr(ctx context.Context, name string) ([]net.IPAddr, error) {
-	return net.DefaultResolver.LookupIPAddr(ctx, name)
+func (r NetResolver) LookupMX(ctx context.Context, name string) ([]*net.MX, error) {
+	if len(r.Servers) == 0 {
+		return net.DefaultResolver.LookupMX(ctx, name)
+	}
+	var lastErr error
+	for _, server := range r.Servers {
+		records, err := resolverForServer(server).LookupMX(ctx, name)
+		if err == nil {
+			return records, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = errors.New("dns lookup failed")
+	}
+	return nil, lastErr
+}
+
+func (r NetResolver) LookupTXT(ctx context.Context, name string) ([]string, error) {
+	if len(r.Servers) == 0 {
+		return net.DefaultResolver.LookupTXT(ctx, name)
+	}
+	var lastErr error
+	for _, server := range r.Servers {
+		records, err := resolverForServer(server).LookupTXT(ctx, name)
+		if err == nil {
+			return records, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = errors.New("dns lookup failed")
+	}
+	return nil, lastErr
+}
+
+func (r NetResolver) LookupIPAddr(ctx context.Context, name string) ([]net.IPAddr, error) {
+	if len(r.Servers) == 0 {
+		return net.DefaultResolver.LookupIPAddr(ctx, name)
+	}
+	var lastErr error
+	for _, server := range r.Servers {
+		records, err := resolverForServer(server).LookupIPAddr(ctx, name)
+		if err == nil {
+			return records, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = errors.New("dns lookup failed")
+	}
+	return nil, lastErr
+}
+
+func resolverForServer(server string) *net.Resolver {
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			if network == "" {
+				network = "udp"
+			}
+			return dialer.DialContext(ctx, network, server)
+		},
+	}
 }
 
 type Verifier struct {
