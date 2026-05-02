@@ -1111,30 +1111,16 @@ tbody tr:hover {
 .email-detail-body {
   flex: 1;
   overflow-y: auto;
-  padding: 20px;
+  padding: 16px 20px;
 }
 
-.email-detail-section {
-  margin-bottom: 20px;
-}
-
-.email-detail-section:last-child {
-  margin-bottom: 0;
-}
-
-.email-detail-section-title {
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--color-text-tertiary);
-  margin-bottom: 10px;
-}
-
+/* HTML body - full width email content */
 .email-detail-html {
   font-size: 14px;
   line-height: 1.7;
   color: var(--color-text);
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--color-border-light);
 }
 
 .email-detail-html img {
@@ -1142,36 +1128,59 @@ tbody tr:hover {
   height: auto;
 }
 
+/* Plain text toggle */
 .email-detail-plain {
   font-size: 13px;
   line-height: 1.6;
   color: var(--color-text-secondary);
   white-space: pre-wrap;
   word-break: break-word;
+  padding: 12px;
+  background: var(--color-surface-hover);
+  border-radius: var(--radius-md);
+  margin-bottom: 12px;
 }
 
-.email-detail-auth {
-  font-size: 12px;
-  color: var(--color-text-tertiary);
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: 'SF Mono', 'Fira Code', monospace;
+.email-detail-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
 }
 
-/* --- Attachments --- */
+/* Attachments area - email client style */
+.email-detail-attachments {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--color-border-light);
+  margin-bottom: 16px;
+}
+
 .attachment-item {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px;
+  gap: 10px;
+  padding: 10px 12px;
   border: 1px solid var(--color-border-light);
   border-radius: var(--radius-md);
-  margin-bottom: 8px;
+  transition: background 0.15s;
 }
 
-.attachment-item:last-child {
-  margin-bottom: 0;
+.attachment-item:hover {
+  background: var(--color-surface-hover);
+}
+
+.attachment-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  background: var(--color-surface-hover);
+  color: var(--color-text-tertiary);
+  flex-shrink: 0;
 }
 
 .attachment-info {
@@ -1189,7 +1198,7 @@ tbody tr:hover {
 .attachment-meta {
   font-size: 12px;
   color: var(--color-text-tertiary);
-  margin-top: 2px;
+  margin-top: 1px;
 }
 
 .attachment-actions {
@@ -1203,6 +1212,65 @@ tbody tr:hover {
   font-size: 12px;
   color: var(--color-danger);
 }
+
+/* Show original - collapsible headers */
+.email-detail-original {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.email-detail-original summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-tertiary);
+  padding: 6px 0;
+  user-select: none;
+}
+
+.email-detail-original summary:hover {
+  color: var(--color-primary);
+}
+
+.email-detail-original-content {
+  padding: 12px;
+  background: var(--color-surface-hover);
+  border-radius: var(--radius-md);
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.email-detail-original-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.original-label {
+  color: var(--color-text-tertiary);
+  font-weight: 500;
+  white-space: nowrap;
+  min-width: 90px;
+}
+
+.original-value {
+  color: var(--color-text-secondary);
+  word-break: break-all;
+}
+
+.email-detail-original-headers {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--color-border-light);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
 
 /* --- Empty States --- */
 .empty-state {

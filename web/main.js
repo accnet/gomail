@@ -1351,28 +1351,29 @@ async function renderEmailDetail(emailID) {
       </div>
 
       <div class="email-detail-body">
-        <!-- HTML Body -->
-        <div class="email-detail-section">
-          <p class="email-detail-section-title">Message</p>
-          <div class="email-detail-html">${email.html_body_sanitized || "<p style='color:var(--color-text-tertiary)'>No HTML content</p>"}</div>
-        </div>
 
-        <!-- Plain Text -->
+        <!-- HTML Body -->
+        <div class="email-detail-html" id="emailHtmlBody">${email.html_body_sanitized || "<p style='color:var(--color-text-tertiary)'>This email has no HTML content.</p>"}</div>
+
+        <!-- Plain Text (hidden by default, toggled) -->
         ${email.text_body ? `
-        <div class="email-detail-section">
-          <p class="email-detail-section-title">Plain Text</p>
-          <div class="email-detail-plain">${escapeHTML(email.text_body)}</div>
+        <div class="email-detail-plain" id="emailPlainBody" style="display:none">${escapeHTML(email.text_body)}</div>
+        <div class="email-detail-actions">
+          <button class="btn btn-ghost btn-xs" id="toggleViewBtn">Show plain text</button>
         </div>
         ` : ""}
 
         <!-- Attachments -->
-        <div class="email-detail-section">
-          <p class="email-detail-section-title">Attachments (${email.attachments?.length || 0})</p>
-          ${email.attachments?.length ? email.attachments.map((att) => `
+        ${email.attachments?.length ? `
+        <div class="email-detail-attachments">
+          ${email.attachments.map((att) => `
             <div class="attachment-item">
+              <div class="attachment-icon">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+              </div>
               <div class="attachment-info">
                 <p class="attachment-name">${escapeHTML(att.filename)}</p>
-                <p class="attachment-meta">${bytes(att.size_bytes)} &middot; ${att.content_type || "unknown"}</p>
+                <p class="attachment-meta">${bytes(att.size_bytes)}</p>
               </div>
               <div class="attachment-actions">
                 ${badge(att.scan_status)}
@@ -1383,15 +1384,57 @@ async function renderEmailDetail(emailID) {
                 }
               </div>
             </div>
-          `).join("") : `
-            <p style="font-size:13px;color:var(--color-text-tertiary)">No attachments.</p>
-          `}
+          `).join("")}
         </div>
+        ` : ""}
 
+        <!-- Show Original (raw headers) -->
+        <details class="email-detail-original">
+          <summary>Show original</summary>
+          <div class="email-detail-original-content">
+            <div class="email-detail-original-row">
+              <span class="original-label">Subject:</span>
+              <span class="original-value">${escapeHTML(email.subject || "")}</span>
+            </div>
+            <div class="email-detail-original-row">
+              <span class="original-label">From:</span>
+              <span class="original-value">${escapeHTML(email.from_address || "")}</span>
+            </div>
+            <div class="email-detail-original-row">
+              <span class="original-label">To:</span>
+              <span class="original-value">${escapeHTML(email.to_address || "")}</span>
+            </div>
+            <div class="email-detail-original-row">
+              <span class="original-label">Date:</span>
+              <span class="original-value">${new Date(email.received_at).toLocaleString()}</span>
+            </div>
+            <div class="email-detail-original-row">
+              <span class="original-label">Message-ID:</span>
+              <span class="original-value">${escapeHTML(email.message_id || "")}</span>
+            </div>
+            ${email.headers_json ? `
+            <div class="email-detail-original-headers">${escapeHTML(JSON.stringify(email.headers_json, null, 2))}</div>
+            ` : ""}
+          </div>
+        </details>
 
       </div>
+
     </div>
   `;
+
+  // Toggle plain text / HTML view
+  const toggleBtn = document.getElementById("toggleViewBtn");
+  const htmlBody = document.getElementById("emailHtmlBody");
+  const plainBody = document.getElementById("emailPlainBody");
+  if (toggleBtn && htmlBody && plainBody) {
+    toggleBtn.onclick = () => {
+      const showingHtml = htmlBody.style.display !== "none";
+      htmlBody.style.display = showingHtml ? "none" : "";
+      plainBody.style.display = showingHtml ? "" : "none";
+      toggleBtn.textContent = showingHtml ? "Show HTML" : "Show plain text";
+    };
+  }
 
   document.querySelectorAll("[data-download-email]").forEach((button) => {
     button.onclick = async () => {
@@ -1400,6 +1443,7 @@ async function renderEmailDetail(emailID) {
       window.open(`/api/emails/${button.dataset.downloadEmail}/attachments/${button.dataset.downloadAttachment}/download?token=${token}`, "_blank");
     };
   });
+
   document.querySelectorAll("[data-override-attachment]").forEach((button) => {
     button.onclick = async () => {
       if (!confirm("Allow this blocked attachment to be downloaded?")) return;
