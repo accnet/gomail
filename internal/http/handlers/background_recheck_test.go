@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"gomail/internal/config"
 	"gomail/internal/db"
 	"gomail/internal/dns"
 
@@ -26,6 +27,10 @@ func (m mxResolverStub) LookupMX(_ context.Context, name string) ([]*net.MX, err
 }
 
 func (m mxResolverStub) LookupTXT(_ context.Context, name string) ([]string, error) {
+	return nil, nil
+}
+
+func (m mxResolverStub) LookupIPAddr(_ context.Context, _ string) ([]net.IPAddr, error) {
 	return nil, nil
 }
 
@@ -58,7 +63,7 @@ func TestRecheckDomainsOnceUpdatesStatuses(t *testing.T) {
 		},
 	}
 
-	recheckDomainsOnce(context.Background(), database, verifier)
+	recheckDomainsOnce(context.Background(), database, verifier, config.Config{})
 
 	var gotPending db.Domain
 	var gotVerified db.Domain

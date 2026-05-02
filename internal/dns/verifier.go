@@ -3,6 +3,7 @@ package dns
 import (
 	"context"
 	"net"
+	"net/netip"
 	"strings"
 	"time"
 )
@@ -10,6 +11,7 @@ import (
 type Resolver interface {
 	LookupMX(ctx context.Context, name string) ([]*net.MX, error)
 	LookupTXT(ctx context.Context, name string) ([]string, error)
+	LookupIPAddr(ctx context.Context, name string) ([]net.IPAddr, error)
 }
 
 type NetResolver struct{}
@@ -20,6 +22,10 @@ func (NetResolver) LookupMX(ctx context.Context, name string) ([]*net.MX, error)
 
 func (NetResolver) LookupTXT(ctx context.Context, name string) ([]string, error) {
 	return net.DefaultResolver.LookupTXT(ctx, name)
+}
+
+func (NetResolver) LookupIPAddr(ctx context.Context, name string) ([]net.IPAddr, error) {
+	return net.DefaultResolver.LookupIPAddr(ctx, name)
 }
 
 type Verifier struct {
@@ -113,6 +119,43 @@ func (v Verifier) VerifyDKIM(ctx context.Context, recordName string, publicKey s
 	return false, "DKIM TXT record not found or public key does not match"
 }
 
+func (v Verifier) VerifyA(ctx context.Context, domain string, requiredIP string) (bool, string) {
+	timeout := v.Timeout
+	if timeout == 0 {
+		timeout = 10 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	resolver := v.Resolver
+	if resolver == nil {
+		resolver = NetResolver{}
+	}
+	addrs, err := resolver.LookupIPAddr(ctx, domain)
+	if err != nil {
+		return false, err.Error()
+	}
+	required, err := netip.ParseAddr(strings.TrimSpace(requiredIP))
+	if err != nil {
+		return false, "invalid required IP " + requiredIP
+	}
+	required = required.Unmap()
+	var found []string
+	for _, addr := range addrs {
+		if len(addr.IP) == 0 {
+			continue
+		}
+		found = append(found, addr.IP.String())
+		candidate, ok := netip.AddrFromSlice(addr.IP)
+		if ok && candidate.Unmap().Compare(required) == 0 {
+			return true, addr.IP.String()
+		}
+	}
+	if len(found) == 0 {
+		return false, "A/AAAA record not found"
+	}
+	return false, "domain resolves to " + strings.Join(found, ", ") + ", expected " + required.String()
+}
+
 func normalize(s string) string {
 	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(s)), ".")
 }
@@ -124,11 +167,38 @@ func normalizeSPF(s string) string {
 func spfContainsMechanism(record string, mechanism string) bool {
 	needle := normalizeSPF(mechanism)
 	for _, field := range strings.Fields(normalizeSPF(record)) {
-		if field == needle {
+		field = strings.TrimPrefix(field, "+")
+		if field == needle || spfMechanismMatches(field, needle) {
 			return true
 		}
 	}
 	return false
+}
+
+func spfMechanismMatches(field string, needle string) bool {
+	fieldKind, fieldValue, fieldHasValue := strings.Cut(field, ":")
+	needleKind, needleValue, needleHasValue := strings.Cut(needle, ":")
+	if fieldKind != needleKind {
+		return false
+	}
+	if !fieldHasValue || !needleHasValue {
+		return false
+	}
+	if fieldKind != "ip4" && fieldKind != "ip6" {
+		return false
+	}
+	needleIP := net.ParseIP(needleValue)
+	if needleIP == nil {
+		return false
+	}
+	if !strings.Contains(fieldValue, "/") {
+		return false
+	}
+	_, network, err := net.ParseCIDR(fieldValue)
+	if err != nil {
+		return false
+	}
+	return network.Contains(needleIP)
 }
 
 func normalizeTXTValue(s string) string {

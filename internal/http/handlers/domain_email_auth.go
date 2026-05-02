@@ -144,6 +144,14 @@ func (a App) verifyDomainEmailAuth(c *gin.Context) {
 		response.Error(c, http.StatusInternalServerError, "email_auth_verify_failed", "could not save verification result")
 		return
 	}
+	domain.WarningStatus = deriveDomainWarningStatus(domain, &db.DomainEmailAuth{
+		SPFStatus:  authStatus(spfOK),
+		DKIMStatus: authStatus(dkimOK),
+	})
+	if err := a.DB.Model(&domain).Update("warning_status", domain.WarningStatus).Error; err != nil {
+		response.Error(c, http.StatusInternalServerError, "email_auth_verify_failed", "could not update domain warning status")
+		return
+	}
 	a.DB.First(&auth, "id = ?", auth.ID)
 	response.OK(c, buildDomainEmailAuthResponse(domain, auth))
 }

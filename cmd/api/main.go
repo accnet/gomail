@@ -55,7 +55,7 @@ func main() {
 	authSvc := auth.NewService(database, cfg)
 	verifier := dns.Verifier{Timeout: cfg.DomainVerifyTimeout, MXTarget: cfg.MXTarget}
 
-	go handlers.BackgroundDomainRecheck(ctx, database, verifier, cfg.DomainRecheckEvery)
+	go handlers.BackgroundDomainRecheck(ctx, database, verifier, cfg, cfg.DomainRecheckEvery)
 
 	staticSvc := staticprojects.NewService(database, cfg)
 	thumbnailWorker := staticprojects.NewThumbnailWorker(database, cfg.StaticSitesRoot, func(subdomain string) string {

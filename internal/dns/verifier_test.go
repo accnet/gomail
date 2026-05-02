@@ -16,6 +16,10 @@ func (f fakeResolver) LookupTXT(ctx context.Context, name string) ([]string, err
 	return nil, nil
 }
 
+func (f fakeResolver) LookupIPAddr(ctx context.Context, name string) ([]net.IPAddr, error) {
+	return nil, nil
+}
+
 type fakeTXTResolver []string
 
 func (f fakeTXTResolver) LookupMX(ctx context.Context, name string) ([]*net.MX, error) {
@@ -24,6 +28,10 @@ func (f fakeTXTResolver) LookupMX(ctx context.Context, name string) ([]*net.MX, 
 
 func (f fakeTXTResolver) LookupTXT(ctx context.Context, name string) ([]string, error) {
 	return []string(f), nil
+}
+
+func (f fakeTXTResolver) LookupIPAddr(ctx context.Context, name string) ([]net.IPAddr, error) {
+	return nil, nil
 }
 
 func TestVerifierRequiresExpectedMXTarget(t *testing.T) {
@@ -44,6 +52,14 @@ func TestVerifierRejectsWrongMXTarget(t *testing.T) {
 
 func TestVerifierChecksSPFRequiredMechanism(t *testing.T) {
 	v := Verifier{Resolver: fakeTXTResolver{`v=spf1 ip4:203.0.113.10 mx -all`}}
+	ok, msg := v.VerifySPF(context.Background(), "example.com", "ip4:203.0.113.10")
+	if !ok || msg != "" {
+		t.Fatalf("expected SPF verify ok, got ok=%v msg=%q", ok, msg)
+	}
+}
+
+func TestVerifierChecksSPFRequiredMechanismWithDefaultQualifier(t *testing.T) {
+	v := Verifier{Resolver: fakeTXTResolver{`v=spf1 +ip4:203.0.113.10/32 mx -all`}}
 	ok, msg := v.VerifySPF(context.Background(), "example.com", "ip4:203.0.113.10")
 	if !ok || msg != "" {
 		t.Fatalf("expected SPF verify ok, got ok=%v msg=%q", ok, msg)

@@ -372,14 +372,138 @@ func TestDomainEmailAuthGenerateDKIM(t *testing.T) {
 	}
 }
 
+func TestVerifyDomainEmailAuthUpdatesDomainWarningStatus(t *testing.T) {
+	app, database := newTestApp(t)
+	app.Config.SMTPRelayPublicIP = "203.0.113.10"
+	app.Config.TraefikPublicIP = "203.0.113.10"
+	app.Verifier = dns.Verifier{
+		MXTarget: app.Config.MXTarget,
+		Timeout:  time.Second,
+		Resolver: stubResolver{
+			target: app.Config.MXTarget,
+			txtRecords: map[string][]string{
+				"warn-auth.test": {`v=spf1 +ip4:203.0.113.10/32 mx -all`},
+			},
+			ipRecords: map[string][]net.IPAddr{
+				"warn-auth.test": {{IP: net.ParseIP("203.0.113.10")}},
+			},
+		},
+	}
+	router := app.Router()
+
+	user := createUser(t, database, "warn-auth@test.local", true, false, false)
+	token := bearerToken(t, app, user)
+	domain := db.Domain{
+		UserID:             user.ID,
+		Name:               "warn-auth.test",
+		Status:             db.DomainStatusVerified,
+		VerificationMethod: "mx",
+		MXTarget:           app.Config.MXTarget,
+		ARecordStatus:      db.ARecordStatusVerified,
+		ARecordResult:      "203.0.113.10",
+	}
+	if err := database.Create(&domain).Error; err != nil {
+		t.Fatal(err)
+	}
+	authRow := db.DomainEmailAuth{
+		DomainID:        domain.ID,
+		SPFStatus:       db.DomainAuthStatusPending,
+		SPFRecord:       "v=spf1 ip4:203.0.113.10 mx -all",
+		DKIMSelector:    "gomail1",
+		DKIMStatus:      db.DomainAuthStatusPending,
+		DKIMPublicKey:   "abc123",
+		DKIMRecordName:  "gomail1._domainkey.warn-auth.test",
+		DKIMRecordValue: "v=DKIM1; k=rsa; p=abc123",
+	}
+	if err := database.Create(&authRow).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	verifyResp := doJSON(t, router, http.MethodPost, "/api/domains/"+domain.ID.String()+"/email-auth/verify", nil, token)
+	if verifyResp.Code != http.StatusOK {
+		t.Fatalf("verify email auth status = %d body=%s", verifyResp.Code, verifyResp.Body.String())
+	}
+
+	var gotDomain db.Domain
+	var gotAuth db.DomainEmailAuth
+	if err := database.First(&gotDomain, "id = ?", domain.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.First(&gotAuth, "domain_id = ?", domain.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if gotAuth.SPFStatus != db.DomainAuthStatusVerified {
+		t.Fatalf("expected SPF verified, got %+v", gotAuth)
+	}
+	if gotAuth.DKIMStatus != db.DomainAuthStatusFailed {
+		t.Fatalf("expected DKIM failed, got %+v", gotAuth)
+	}
+	if gotDomain.WarningStatus != domainVerifiedWarningStatus {
+		t.Fatalf("expected domain warning status %q, got %+v", domainVerifiedWarningStatus, gotDomain)
+	}
+}
+
+func TestVerifyDomainUpdatesARecordStatus(t *testing.T) {
+	app, database := newTestApp(t)
+	app.Config.TraefikPublicIP = "203.0.113.10"
+	app.Verifier = dns.Verifier{
+		MXTarget: app.Config.MXTarget,
+		Timeout:  time.Second,
+		Resolver: stubResolver{
+			target: app.Config.MXTarget,
+			ipRecords: map[string][]net.IPAddr{
+				"a-record.test": {{IP: net.ParseIP("203.0.113.10")}},
+			},
+		},
+	}
+	router := app.Router()
+
+	user := createUser(t, database, "a-record@test.local", true, false, false)
+	token := bearerToken(t, app, user)
+	createResp := doJSON(t, router, http.MethodPost, "/api/domains", map[string]any{"name": "a-record.test"}, token)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("create domain status = %d body=%s", createResp.Code, createResp.Body.String())
+	}
+
+	var domain db.Domain
+	if err := database.Where("name = ?", "a-record.test").First(&domain).Error; err != nil {
+		t.Fatal(err)
+	}
+	verifyResp := doJSON(t, router, http.MethodPost, "/api/domains/"+domain.ID.String()+"/verify", nil, token)
+	if verifyResp.Code != http.StatusOK {
+		t.Fatalf("verify domain status = %d body=%s", verifyResp.Code, verifyResp.Body.String())
+	}
+	if err := database.First(&domain, "id = ?", domain.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if domain.ARecordStatus != db.ARecordStatusVerified || domain.ARecordResult != "203.0.113.10" {
+		t.Fatalf("expected verified A record, got %+v", domain)
+	}
+	if domain.WarningStatus != "" {
+		t.Fatalf("expected no warning status, got %+v", domain)
+	}
+}
+
 type stubResolver struct {
-	target string
+	target     string
+	txtRecords map[string][]string
+	ipRecords  map[string][]net.IPAddr
 }
 
 func (s stubResolver) LookupMX(_ context.Context, _ string) ([]*net.MX, error) {
 	return []*net.MX{{Host: s.target + ".", Pref: 10}}, nil
 }
 
-func (s stubResolver) LookupTXT(_ context.Context, _ string) ([]string, error) {
-	return nil, nil
+func (s stubResolver) LookupTXT(_ context.Context, name string) ([]string, error) {
+	if s.txtRecords == nil {
+		return nil, nil
+	}
+	return s.txtRecords[name], nil
+}
+
+func (s stubResolver) LookupIPAddr(_ context.Context, name string) ([]net.IPAddr, error) {
+	if s.ipRecords == nil {
+		return nil, nil
+	}
+	return s.ipRecords[name], nil
 }

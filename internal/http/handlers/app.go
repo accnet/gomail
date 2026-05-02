@@ -277,18 +277,33 @@ func (a App) verifyDomain(c *gin.Context) {
 		return
 	}
 	ok, errMsg := a.Verifier.Verify(c.Request.Context(), row.Name)
-	now := time.Now()
 	status := "failed"
-	warning := ""
 	if ok {
 		status = "verified"
 		errMsg = ""
 	} else if row.Status == "verified" {
 		status = "verified"
-		warning = "verified_warning"
 	}
-	a.DB.Model(&row).Updates(map[string]any{"status": status, "warning_status": warning, "last_verified_at": &now, "verification_error": errMsg})
-	payload, _ := json.Marshal(gin.H{"ok": ok, "error": errMsg, "warning": warning})
+	aStatus, aResult, aCheckedAt := verifyDomainARecord(c.Request.Context(), a.Verifier, a.Config, row.Name)
+	now := time.Now()
+	row.Status = status
+	row.VerificationError = errMsg
+	row.LastVerifiedAt = &now
+	row.ARecordStatus = aStatus
+	row.ARecordResult = aResult
+	row.ARecordCheckAt = aCheckedAt
+	authRow, _ := loadOptionalDomainEmailAuth(a.DB, row.ID)
+	row.WarningStatus = deriveDomainWarningStatus(row, authRow)
+	a.DB.Model(&row).Updates(map[string]any{
+		"status":             row.Status,
+		"warning_status":     row.WarningStatus,
+		"last_verified_at":   row.LastVerifiedAt,
+		"verification_error": row.VerificationError,
+		"a_record_status":    row.ARecordStatus,
+		"a_record_result":    row.ARecordResult,
+		"a_record_check_at":  row.ARecordCheckAt,
+	})
+	payload, _ := json.Marshal(gin.H{"ok": ok, "error": errMsg, "warning": row.WarningStatus, "a_record_status": row.ARecordStatus, "a_record_result": row.ARecordResult})
 	a.DB.Create(&db.DomainEvent{DomainID: row.ID, Type: "domain.verify", Payload: payload})
 	a.DB.First(&row, "id = ?", row.ID)
 	if ok && a.Redis != nil {
@@ -768,7 +783,7 @@ func parsePositiveInt(raw string, min int, max int) (int, error) {
 	return n, nil
 }
 
-func BackgroundDomainRecheck(ctx context.Context, database *gorm.DB, verifier dns.Verifier, every time.Duration) {
+func BackgroundDomainRecheck(ctx context.Context, database *gorm.DB, verifier dns.Verifier, cfg config.Config, every time.Duration) {
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 	for {
@@ -776,26 +791,35 @@ func BackgroundDomainRecheck(ctx context.Context, database *gorm.DB, verifier dn
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			recheckDomainsOnce(ctx, database, verifier)
+			recheckDomainsOnce(ctx, database, verifier, cfg)
 		}
 	}
 }
 
-func recheckDomainsOnce(ctx context.Context, database *gorm.DB, verifier dns.Verifier) {
+func recheckDomainsOnce(ctx context.Context, database *gorm.DB, verifier dns.Verifier, cfg config.Config) {
 	var domains []db.Domain
 	database.Where("status IN ?", []string{"pending", "verified"}).Find(&domains)
 	for _, domain := range domains {
 		ok, msg := verifier.Verify(ctx, domain.Name)
+		aStatus, aResult, aCheckedAt := verifyDomainARecord(ctx, verifier, cfg, domain.Name)
 		now := time.Now()
-		updates := map[string]any{"last_verified_at": &now, "verification_error": msg}
+		updates := map[string]any{"last_verified_at": &now, "verification_error": msg, "a_record_status": aStatus, "a_record_result": aResult, "a_record_check_at": aCheckedAt}
 		if ok {
 			updates["status"] = "verified"
-			updates["warning_status"] = ""
 		} else if domain.Status == "verified" {
-			updates["warning_status"] = "verified_warning"
+			updates["status"] = "verified"
 		} else {
 			updates["status"] = "failed"
 		}
+		candidate := domain
+		candidate.Status = updates["status"].(string)
+		candidate.VerificationError = msg
+		candidate.LastVerifiedAt = &now
+		candidate.ARecordStatus = aStatus
+		candidate.ARecordResult = aResult
+		candidate.ARecordCheckAt = aCheckedAt
+		authRow, _ := loadOptionalDomainEmailAuth(database, domain.ID)
+		updates["warning_status"] = deriveDomainWarningStatus(candidate, authRow)
 		database.Model(&domain).Updates(updates)
 	}
 }
