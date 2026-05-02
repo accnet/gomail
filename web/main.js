@@ -757,7 +757,30 @@ async function renderDomains() {
   const mxTarget = state.domains[0]?.mx_target || "Configured on server";
   els.sidebarMx.textContent = mxTarget;
 
+  const verifiedCount = state.domains.filter((d) => d.status === "verified").length;
+  const warningCount = state.domains.filter((d) => d.warning_status).length;
+  const failedCount = state.domains.filter((d) => d.status === "failed" || d.status === "pending").length;
+
   els.pageContent.innerHTML = `
+    <div class="domain-summary">
+      <div class="domain-summary-item">
+        <span class="domain-summary-dot total"></span>
+        <span><strong>${state.domains.length}</strong> Total</span>
+      </div>
+      <div class="domain-summary-item">
+        <span class="domain-summary-dot verified"></span>
+        <span><strong>${verifiedCount}</strong> Verified</span>
+      </div>
+      <div class="domain-summary-item">
+        <span class="domain-summary-dot warning"></span>
+        <span><strong>${warningCount}</strong> Warnings</span>
+      </div>
+      <div class="domain-summary-item">
+        <span class="domain-summary-dot failed"></span>
+        <span><strong>${failedCount}</strong> Pending / Failed</span>
+      </div>
+    </div>
+
     <div class="card" style="margin-bottom:20px">
       <div class="card-header">
         <h3>Claimed Domains</h3>
@@ -787,8 +810,11 @@ async function renderDomains() {
               ${state.domains.length ? state.domains.map((domain) => `
                 <tr>
                   <td>
-                    <p style="font-weight:500">${escapeHTML(domain.name)}</p>
-                    ${domain.verification_error ? `<p style="font-size:12px;color:var(--color-danger);margin-top:2px">${escapeHTML(domain.verification_error)}</p>` : ""}
+                    <div class="domain-cell">
+                      <span class="domain-cell-name">${escapeHTML(domain.name)}</span>
+                      ${domain.verification_error ? `<span class="domain-cell-error">${escapeHTML(domain.verification_error)}</span>` : ""}
+                      <span class="domain-cell-meta">${domain.warning_status ? "Warning: check DNS records" : "All checks passing"}</span>
+                    </div>
                   </td>
                   <td>
                     ${renderDomainWebsiteCell(domain, findWebsiteByDomain(domain.name))}
@@ -803,10 +829,14 @@ async function renderDomains() {
                   <td>
                     ${renderDomainEmailCheckCell(domain)}
                   </td>
-                  <td>${badge(domain.warning_status || domain.status)}</td>
-                  <td style="font-size:13px;color:var(--color-text-secondary)">${relative(domain.last_verified_at)}</td>
                   <td>
-                    <div style="display:flex;gap:4px">
+                    <div class="domain-status-row">
+                      ${badge(domain.warning_status || domain.status)}
+                    </div>
+                  </td>
+                  <td style="font-size:13px;color:var(--color-text-secondary);white-space:nowrap">${relative(domain.last_verified_at)}</td>
+                  <td>
+                    <div class="domain-actions">
                       <button data-domain-delete="${domain.id}" class="icon-btn" title="Delete" style="color:var(--color-danger)">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
                       </button>
