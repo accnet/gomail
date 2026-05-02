@@ -328,7 +328,6 @@ function renderDomainWebsiteCell(domain, site) {
   return renderDomainCheckCell({
     status: domain.a_record_status,
     detail,
-    verifyAttr: `data-domain-verify-a="${domain.id}"`,
     extraAction
   });
 }
@@ -639,126 +638,236 @@ window.addEventListener("beforeunload", () => {
 // --- Dashboard ---
 async function renderDashboard() {
   setView("dashboard");
-  const [dashboard, domains, inboxes, emailsPayload] = await Promise.all([
+  const [dashboard, domains, inboxes, emailsPayload, websites] = await Promise.all([
     api("/dashboard"),
     api("/domains"),
     api("/inboxes"),
-    api("/emails?page=1&page_size=100")
+    api("/emails?page=1&page_size=100"),
+    api("/static-projects")
   ]);
   state.dashboard = dashboard;
   state.domains = domains;
   state.inboxes = inboxes;
   state.emails = emailItems(emailsPayload);
+  state.websites = websites || [];
 
-  const activeDomains = domains.filter((d) => d.status === "verified").length;
+  const verifiedDomains = domains.filter((d) => d.status === "verified").length;
   const warningDomains = domains.filter((d) => d.warning_status).length;
-  const activeInboxes = inboxes.filter((i) => i.is_active).length;
+  const failedDomains = domains.filter((d) => d.status === "failed" || d.status === "pending").length;
+  const totalDomains = domains.length;
+
+  const userLabel = currentUser.is_admin ? "Admin" : "User";
+  const userInit = initials(currentUser.name || currentUser.email);
+  const name = currentUser.name || currentUser.email?.split("@")[0] || "User";
+
+  const greeting = (() => {
+    const h = new Date().getHours();
+    if (h < 12) return "Good morning";
+    if (h < 18) return "Good afternoon";
+    return "Good evening";
+  })();
 
   els.pageContent.innerHTML = `
-    <div class="dashboard-hero">
-      <p class="dashboard-hero-label">Control Room</p>
-      <h2 class="dashboard-hero-title">Operational overview</h2>
-    </div>
-
-    <div class="stats-grid stats-3" style="margin-bottom:20px">
-      <div class="stat-card">
-        <p class="stat-label">Mail Today</p>
-        <p class="stat-value">${dashboard.mail_today}</p>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:28px">
+      <div>
+        <p style="font-size:14px;color:var(--color-text-secondary);margin-bottom:2px">${greeting},</p>
+        <h1 style="font-size:24px;font-weight:700;color:var(--color-text)">${escapeHTML(name)}</h1>
+        <p style="font-size:13px;color:var(--color-text-tertiary);margin-top:4px">Welcome back to GoMail — here's your overview.</p>
       </div>
-      <div class="stat-card">
-        <p class="stat-label">Storage Used</p>
-        <p class="stat-value">${bytes(dashboard.storage_used_bytes)}</p>
-      </div>
-      <div class="stat-card">
-        <p class="stat-label">Active Inboxes</p>
-        <p class="stat-value">${dashboard.active_inboxes}</p>
+      <div style="display:flex;align-items:center;gap:12px">
+        <span class="badge badge-verified" style="font-size:12px;padding:4px 12px">${userLabel}</span>
+        <div style="display:flex;align-items:center;gap:10px;padding:8px 14px;background:var(--color-card-bg);border:1px solid var(--color-border);border-radius:var(--radius-lg)">
+          <div style="width:10px;height:10px;border-radius:50%;background:var(--color-success)"></div>
+          <span style="font-size:13px;color:var(--color-text-secondary)">All systems operational</span>
+        </div>
       </div>
     </div>
 
-    <div class="grid-2 grid-2-wide">
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:24px">
+      <div class="stat-card" style="display:flex;align-items:center;gap:14px;padding:18px 20px">
+        <div style="display:flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:var(--radius-md);background:var(--color-primary-light);color:var(--color-primary);flex-shrink:0">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+        </div>
+        <div>
+          <p class="stat-value">${dashboard.mail_today}</p>
+          <p class="stat-label" style="margin-bottom:0">Mail Today</p>
+        </div>
+      </div>
+      <div class="stat-card" style="display:flex;align-items:center;gap:14px;padding:18px 20px">
+        <div style="display:flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:var(--radius-md);background:var(--color-success-light);color:var(--color-success);flex-shrink:0">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+        </div>
+        <div>
+          <p class="stat-value">${bytes(dashboard.storage_used_bytes)}</p>
+          <p class="stat-label" style="margin-bottom:0">Storage Used</p>
+        </div>
+      </div>
+      <div class="stat-card" style="display:flex;align-items:center;gap:14px;padding:18px 20px">
+        <div style="display:flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:var(--radius-md);background:var(--color-warning-light);color:var(--color-warning);flex-shrink:0">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+        </div>
+        <div>
+          <p class="stat-value">${dashboard.active_inboxes}</p>
+          <p class="stat-label" style="margin-bottom:0">Active Inboxes</p>
+        </div>
+      </div>
+      <div class="stat-card" style="display:flex;align-items:center;gap:14px;padding:18px 20px">
+        <div style="display:flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:var(--radius-md);background:var(--color-surface-hover);color:var(--color-text-secondary);flex-shrink:0">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
+        </div>
+        <div>
+          <p class="stat-value">${totalDomains}</p>
+          <p class="stat-label" style="margin-bottom:0">Domains</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid-2 grid-2-wide" style="margin-bottom:20px">
       <div class="card">
         <div class="card-header">
-          <h3>Domain Posture</h3>
+          <h3>Domain Health</h3>
         </div>
         <div class="card-body">
-          <div class="stats-grid stats-3">
-            <div class="stat-card" style="border:none;padding:12px;background:var(--color-surface-hover)">
-              <p class="stat-label">Total</p>
-              <p class="stat-value stat-value-sm">${domains.length}</p>
-            </div>
-            <div class="stat-card" style="border:none;padding:12px;background:var(--color-surface-hover)">
-              <p class="stat-label">Verified</p>
-              <p class="stat-value stat-value-sm">${activeDomains}</p>
-            </div>
-            <div class="stat-card" style="border:none;padding:12px;background:var(--color-surface-hover)">
-              <p class="stat-label">Warnings</p>
-              <p class="stat-value stat-value-sm">${warningDomains}</p>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-header">
-          <h3>Recent Intake</h3>
-        </div>
-        <div class="card-body" style="padding:12px 20px">
-          ${state.emails.length ? state.emails.slice(0, 5).map((mail) => `
-            <div class="info-row" style="cursor:default">
-              <div style="min-width:0;flex:1">
-                <p style="font-size:13px;font-weight:500;color:var(--color-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHTML(mail.subject || "(no subject)")}</p>
-                <p style="font-size:12px;color:var(--color-text-tertiary);margin-top:2px">${escapeHTML(mail.from_address || "Unknown")} &middot; ${relative(mail.received_at)}</p>
+          ${totalDomains > 0 ? `
+            <div style="display:flex;flex-direction:column;gap:16px">
+              <div>
+                <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+                  <span style="font-size:13px;font-weight:500;color:var(--color-success)">Verified</span>
+                  <span style="font-size:13px;color:var(--color-text-secondary)">${verifiedDomains} / ${totalDomains}</span>
+                </div>
+                <div style="width:100%;height:8px;background:var(--color-surface-hover);border-radius:999px;overflow:hidden">
+                  <div style="width:${totalDomains > 0 ? Math.round((verifiedDomains / totalDomains) * 100) : 0}%;height:100%;background:var(--color-success);border-radius:999px;transition:width 0.3s"></div>
+                </div>
+              </div>
+              <div>
+                <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+                  <span style="font-size:13px;font-weight:500;color:var(--color-warning)">Warnings</span>
+                  <span style="font-size:13px;color:var(--color-text-secondary)">${warningDomains} / ${totalDomains}</span>
+                </div>
+                <div style="width:100%;height:8px;background:var(--color-surface-hover);border-radius:999px;overflow:hidden">
+                  <div style="width:${totalDomains > 0 ? Math.round((warningDomains / totalDomains) * 100) : 0}%;height:100%;background:var(--color-warning);border-radius:999px;transition:width 0.3s"></div>
+                </div>
+              </div>
+              <div>
+                <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+                  <span style="font-size:13px;font-weight:500;color:var(--color-danger)">Pending / Failed</span>
+                  <span style="font-size:13px;color:var(--color-text-secondary)">${failedDomains} / ${totalDomains}</span>
+                </div>
+                <div style="width:100%;height:8px;background:var(--color-surface-hover);border-radius:999px;overflow:hidden">
+                  <div style="width:${totalDomains > 0 ? Math.round((failedDomains / totalDomains) * 100) : 0}%;height:100%;background:var(--color-danger);border-radius:999px;transition:width 0.3s"></div>
+                </div>
               </div>
             </div>
+          ` : `
+            <div class="empty-state" style="padding:16px">
+              <p class="empty-state-title">No domains yet</p>
+              <p class="empty-state-desc">Add and verify a domain to start receiving mail.</p>
+            </div>
+          `}
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
+          <h3>Recent Intake</h3>
+          ${state.emails.length ? `<span style="font-size:12px;color:var(--color-text-tertiary)">${state.emails.length} total</span>` : ""}
+        </div>
+        <div class="card-body" style="padding:0">
+          ${state.emails.length ? state.emails.slice(0, 6).map((mail) => `
+            <div style="display:flex;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--color-border-light);transition:background 0.1s" onmouseover="this.style.background='var(--color-surface-hover)'" onmouseout="this.style.background=''">
+              <div style="display:flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:var(--color-primary-light);color:var(--color-primary);font-size:12px;font-weight:600;flex-shrink:0">${initials(mail.from_address)}</div>
+              <div style="min-width:0;flex:1">
+                <p style="font-size:13px;font-weight:500;color:var(--color-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHTML(mail.subject || "(no subject)")}</p>
+                <p style="font-size:12px;color:var(--color-text-tertiary);margin-top:2px">${escapeHTML(mail.from_address || "Unknown")}</p>
+              </div>
+              <span style="font-size:11px;color:var(--color-text-tertiary);flex-shrink:0;white-space:nowrap">${relative(mail.received_at)}</span>
+            </div>
           `).join("") : `
-            <div class="empty-state" style="padding:24px">
-              <p style="font-size:13px;color:var(--color-text-tertiary)">No mail received yet.</p>
+            <div class="empty-state" style="padding:36px 24px">
+              <div class="empty-state-icon">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+              </div>
+              <p class="empty-state-title">No messages yet</p>
+              <p class="empty-state-desc">Inbound mail will appear here once received.</p>
             </div>
           `}
         </div>
       </div>
     </div>
 
-    <div class="grid-2 grid-2-equal" style="margin-top:20px">
+    <div class="grid-2 grid-2-equal">
       <div class="card">
         <div class="card-header">
           <h3>Account</h3>
         </div>
-        <div class="card-body">
+        <div class="card-body" style="display:grid;gap:10px">
           <div class="info-row">
-            <span class="info-row-label">Email</span>
+            <span class="info-row-label">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:6px"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+              Email
+            </span>
             <span class="info-row-value">${escapeHTML(currentUser.email)}</span>
           </div>
           <div class="info-row">
-            <span class="info-row-label">Role</span>
-            <span class="info-row-value">${currentUser.is_admin ? "Admin" : "User"}</span>
+            <span class="info-row-label">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:6px"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+              Role
+            </span>
+            <span class="info-row-value">${userLabel}</span>
           </div>
           <div class="info-row">
-            <span class="info-row-label">Storage Quota</span>
-            <span class="info-row-value">${bytes(currentUser.max_storage_bytes)}</span>
+            <span class="info-row-label">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:6px"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+              Storage
+            </span>
+            <span class="info-row-value">${bytes(dashboard.storage_used_bytes)} / ${bytes(currentUser.max_storage_bytes)}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-row-label">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:6px"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+              Websites
+            </span>
+            <span class="info-row-value">${state.websites?.length || 0} deployed</span>
           </div>
         </div>
       </div>
-
       <div class="card">
         <div class="card-header">
           <h3>Infrastructure</h3>
         </div>
-        <div class="card-body">
+        <div class="card-body" style="display:grid;gap:10px">
           <div class="info-row">
-            <span class="info-row-label">App URL</span>
+            <span class="info-row-label">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:6px"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
+              App URL
+            </span>
             <span class="info-row-value" style="font-size:12px">${window.location.origin}</span>
           </div>
           <div class="info-row">
-            <span class="info-row-label">MX Target</span>
+            <span class="info-row-label">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:6px"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
+              MX Target
+            </span>
             <span class="info-row-value" style="font-size:12px">${state.domains[0]?.mx_target || "Configured on server"}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-row-label">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:6px"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+              Service Status
+            </span>
+            <span class="info-row-value">${badge("verified")}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-row-label">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:6px"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+              Last Updated
+            </span>
+            <span class="info-row-value" style="font-size:12px">${relative(new Date().toISOString())}</span>
           </div>
         </div>
       </div>
     </div>
   `;
 }
-
 // --- Domains ---
 async function renderDomains() {
   setView("domains");
@@ -840,8 +949,7 @@ async function renderDomains() {
                   <td>
                     ${renderDomainCheckCell({
                       status: domain.mx_status || domain.status,
-                      detail: domain.mx_target || "Configured on server",
-                      verifyAttr: `data-domain-verify-mx="${domain.id}"`
+                      detail: domain.mx_target || "Configured on server"
                     })}
                   </td>
                   <td>
@@ -857,6 +965,9 @@ async function renderDomains() {
                         </button>
 
                         <div class="action-dots-menu hidden">
+                          <button data-domain-verify-a="${domain.id}" class="action-dots-item">Check A Record</button>
+                          <button data-domain-verify-mx="${domain.id}" class="action-dots-item">Check MX Record</button>
+                          <div style="height:1px;background:var(--color-border);margin:4px 0"></div>
                           <button data-domain-email-auth="${domain.id}" class="action-dots-item">Verify SPF/DKIM</button>
                           <div style="height:1px;background:var(--color-border);margin:4px 0"></div>
                           <button data-domain-delete="${domain.id}" class="action-dots-item action-dots-danger">Delete</button>
@@ -971,7 +1082,28 @@ async function renderDomains() {
 
       // Close all other menus
       document.querySelectorAll(".action-dots-menu").forEach((m) => m.classList.add("hidden"));
-      menu.classList.toggle("hidden");
+
+      const isOpening = menu.classList.contains("hidden");
+      if (!isOpening) {
+        menu.classList.add("hidden");
+        return;
+      }
+
+      // Position the menu using fixed coords so it floats above the table
+      const rect = trigger.getBoundingClientRect();
+      const menuWidth = 180;
+      let left = rect.right - menuWidth;
+      let top = rect.bottom + 4;
+
+      // Keep menu within viewport
+      if (left < 8) left = 8;
+      if (top + 200 > window.innerHeight) {
+        top = rect.top - 200;
+      }
+
+      menu.style.left = left + "px";
+      menu.style.top = top + "px";
+      menu.classList.remove("hidden");
     };
   });
 
@@ -1178,10 +1310,14 @@ async function renderEmail() {
               <span class="inbox-address">${escapeHTML(inbox.address)}</span>
               <div style="display:flex;align-items:center;gap:4px;flex-shrink:0">
                 <span class="inbox-status">${inbox.is_active ? "Active" : "Off"}</span>
-                <button data-inbox-delete="${inbox.id}" class="icon-btn" title="Delete mailbox" style="width:24px;height:24px;color:var(--color-text-tertiary)">
-
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
-                </button>
+                <div class="action-dots">
+                  <button class="action-dots-trigger icon-btn" title="Actions" style="width:24px;height:24px">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>
+                  </button>
+                  <div class="action-dots-menu hidden">
+                    <button data-inbox-delete="${inbox.id}" class="action-dots-item action-dots-danger">Delete Mailbox</button>
+                  </div>
+                </div>
               </div>
             </div>
           `).join("") : `
@@ -1337,6 +1473,38 @@ async function renderEmail() {
       state.selectedEmailID = filteredEmails.find((m) => m.inbox_id === state.selectedInboxID)?.id ||
         state.emails.find((m) => m.inbox_id === state.selectedInboxID)?.id || null;
       await renderEmail();
+    };
+  });
+
+  // Action dots for mailbox items
+  document.querySelectorAll("#page-content .email-panel .inbox-item .action-dots-trigger").forEach((trigger) => {
+    trigger.onclick = (e) => {
+      e.stopPropagation();
+      const dots = trigger.closest(".action-dots");
+      const menu = dots?.querySelector(".action-dots-menu");
+      if (!menu) return;
+
+      document.querySelectorAll(".action-dots-menu").forEach((m) => m.classList.add("hidden"));
+
+      const isOpening = menu.classList.contains("hidden");
+      if (!isOpening) {
+        menu.classList.add("hidden");
+        return;
+      }
+
+      const rect = trigger.getBoundingClientRect();
+      const menuWidth = 180;
+      let left = rect.right - menuWidth;
+      let top = rect.bottom + 4;
+
+      if (left < 8) left = 8;
+      if (top + 200 > window.innerHeight) {
+        top = rect.top - 200;
+      }
+
+      menu.style.left = left + "px";
+      menu.style.top = top + "px";
+      menu.classList.remove("hidden");
     };
   });
 

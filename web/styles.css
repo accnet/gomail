@@ -1576,30 +1576,6 @@ tbody tr:hover {
   line-height: 1.5;
 }
 
-/* --- Dashboard Hero --- */
-.dashboard-hero {
-  background: var(--color-card-bg);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  padding: 24px;
-  margin-bottom: 20px;
-}
-
-.dashboard-hero-label {
-  font-size: 12px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--color-text-tertiary);
-  margin-bottom: 4px;
-}
-
-.dashboard-hero-title {
-  font-size: 22px;
-  font-weight: 700;
-  color: var(--color-text);
-}
-
 /* --- Info Rows --- */
 .info-row {
   display: flex;
@@ -1782,16 +1758,22 @@ tbody tr:hover {
 }
 
 .action-dots-menu {
-  position: absolute;
-  z-index: 100;
-  top: calc(100% + 4px);
-  right: 0;
-  min-width: 160px;
+  position: fixed;
+  z-index: 1000;
+  min-width: 180px;
   padding: 4px;
   background: var(--color-card-bg);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  box-shadow: 0 4px 16px var(--color-shadow-lg);
+  box-shadow: 0 8px 32px var(--color-shadow-lg);
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 0.12s, transform 0.12s;
+}
+
+.action-dots-menu:not(.hidden) {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .action-dots-item {
