@@ -1388,11 +1388,7 @@ async function renderEmailDetail(emailID) {
           `}
         </div>
 
-        <!-- Auth Results -->
-        <div class="email-detail-section">
-          <p class="email-detail-section-title">Authentication</p>
-          <div class="email-detail-auth">${escapeHTML(JSON.stringify(email.auth_results_json || {}, null, 2))}</div>
-        </div>
+
       </div>
     </div>
   `;
