@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -656,7 +657,7 @@ func (s *Service) Delete(userID uuid.UUID, projectID uuid.UUID) error {
 	}
 	// Cleanup domain binding if any
 	if project.DomainID != nil {
-		s.cleanupTraefikConfig(project)
+		s.cleanupCustomDomainTLS(project)
 	}
 	// Cleanup files
 	s.Storage.CleanupProjectDirs(project.ID)
@@ -745,7 +746,7 @@ func (s *Service) UnassignDomain(userID uuid.UUID, projectID uuid.UUID) (*Projec
 		return nil, ErrNotFound
 	}
 
-	s.cleanupTraefikConfig(project)
+	s.cleanupCustomDomainTLS(project)
 
 	s.DB.Model(&project).Updates(map[string]any{
 		"domain_id":                nil,
@@ -813,7 +814,7 @@ func (s *Service) CheckDomainIP(projectID uuid.UUID, userID uuid.UUID) (bool, st
 	return false, result, nil
 }
 
-// ActiveSSL generates Traefik config for the custom domain.
+// ActiveSSL provisions HTTPS for the assigned custom domain.
 func (s *Service) ActiveSSL(userID uuid.UUID, projectID uuid.UUID) (*ProjectResponse, error) {
 	var project db.StaticProject
 	if err := s.DB.First(&project, "id = ? AND user_id = ?", projectID, userID).Error; err != nil {
@@ -826,7 +827,7 @@ func (s *Service) ActiveSSL(userID uuid.UUID, projectID uuid.UUID) (*ProjectResp
 		return nil, ErrSSLConditionNotMet
 	}
 
-	if err := s.writeTraefikConfig(project); err != nil {
+	if err := s.provisionCustomDomainTLS(project); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrPublishFailed, err)
 	}
 
@@ -872,6 +873,66 @@ func (s *Service) domainSSLReady(userID uuid.UUID, project *db.StaticProject) bo
 		"domain_last_dns_check_at": project.DomainLastDNSCheckAt,
 	})
 	return true
+}
+
+func (s *Service) provisionCustomDomainTLS(project db.StaticProject) error {
+	switch s.customDomainSSLProvider() {
+	case "command":
+		return s.runCustomDomainSSLCommand(s.Config.StaticSitesSSLIssueCommand, project.AssignedDomain)
+	case "traefik":
+		return s.writeTraefikConfig(project)
+	default:
+		return fmt.Errorf("unsupported custom domain SSL provider: %s", s.customDomainSSLProvider())
+	}
+}
+
+func (s *Service) cleanupCustomDomainTLS(project db.StaticProject) {
+	switch s.customDomainSSLProvider() {
+	case "command":
+		_ = s.runCustomDomainSSLCommand(s.Config.StaticSitesSSLCleanupCommand, project.AssignedDomain)
+	case "traefik":
+		s.cleanupTraefikConfig(project)
+	default:
+		s.cleanupTraefikConfig(project)
+	}
+}
+
+func (s *Service) customDomainSSLProvider() string {
+	provider := strings.ToLower(strings.TrimSpace(s.Config.StaticSitesSSLProvider))
+	if provider == "" || provider == "auto" {
+		if strings.TrimSpace(s.Config.StaticSitesSSLIssueCommand) != "" || strings.TrimSpace(s.Config.StaticSitesSSLCleanupCommand) != "" {
+			return "command"
+		}
+		return "traefik"
+	}
+	return provider
+}
+
+func (s *Service) runCustomDomainSSLCommand(commandText string, domain string) error {
+	commandText = strings.TrimSpace(commandText)
+	if commandText == "" {
+		return errors.New("custom domain SSL command is not configured")
+	}
+
+	fields := strings.Fields(commandText)
+	if len(fields) == 0 {
+		return errors.New("custom domain SSL command is empty")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, fields[0], append(fields[1:], domain)...)
+	cmd.Env = os.Environ()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(output))
+		if message == "" {
+			return err
+		}
+		return fmt.Errorf("%s: %w", message, err)
+	}
+	return nil
 }
 
 // writeTraefikConfig writes a Traefik dynamic config file for the custom domain.

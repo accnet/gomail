@@ -464,6 +464,73 @@ func TestDomainAssignmentAndActiveSSL(t *testing.T) {
 	}
 }
 
+func TestDomainAssignmentAndActiveSSLWithCommandProvisioner(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AutoMigrate(&db.User{}, &db.Domain{}, &db.StaticProject{}); err != nil {
+		t.Fatal(err)
+	}
+
+	userID := uuid.New()
+	projectID := uuid.New()
+	domainID := uuid.New()
+	tempDir := t.TempDir()
+	commandLog := filepath.Join(tempDir, "ssl-command.log")
+	issueScript := filepath.Join(tempDir, "issue.sh")
+	cleanupScript := filepath.Join(tempDir, "cleanup.sh")
+
+	if err := os.WriteFile(issueScript, []byte("#!/usr/bin/env bash\nprintf 'issue:%s\n' \"$1\" >> \""+commandLog+"\"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cleanupScript, []byte("#!/usr/bin/env bash\nprintf 'cleanup:%s\n' \"$1\" >> \""+commandLog+"\"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	rows := []any{
+		&db.User{ID: userID, Email: "owner@example.com", MaxWebsites: 2},
+		&db.Domain{ID: domainID, UserID: userID, Name: "site.example.com", Status: "verified", ARecordStatus: db.ARecordStatusVerified},
+		&db.StaticProject{ID: projectID, UserID: userID, Name: "Site", Subdomain: "site", Status: "published", IsActive: true},
+	}
+	for _, row := range rows {
+		if err := database.Create(row).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	svc := NewService(database, config.Config{
+		StaticSitesRoot:              t.TempDir(),
+		StaticSitesSSLProvider:       "command",
+		StaticSitesSSLIssueCommand:   issueScript,
+		StaticSitesSSLCleanupCommand: cleanupScript,
+	})
+
+	if _, err := svc.AssignDomain(userID, projectID, domainID); err != nil {
+		t.Fatal(err)
+	}
+	project, err := svc.ActiveSSL(userID, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.DomainBindingStatus != db.DomainBindingStatusSSLActive {
+		t.Fatalf("status = %q", project.DomainBindingStatus)
+	}
+
+	if _, err := svc.UnassignDomain(userID, projectID); err != nil {
+		t.Fatal(err)
+	}
+
+	logData, err := os.ReadFile(commandLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(logData)
+	if !strings.Contains(got, "issue:site.example.com") || !strings.Contains(got, "cleanup:site.example.com") {
+		t.Fatalf("command log = %q", got)
+	}
+}
+
 func TestThumbnailWorkerProcessesActivePublishedProjects(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {

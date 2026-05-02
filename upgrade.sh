@@ -9,6 +9,8 @@ APP_ROOT="${APP_ROOT:-$INSTALL_ROOT/current}"
 BIN_DIR="${BIN_DIR:-$INSTALL_ROOT/bin}"
 ENV_FILE="${ENV_FILE:-$INSTALL_ROOT/.env}"
 COMPOSE_FILE="${COMPOSE_FILE:-$INSTALL_ROOT/docker-compose.infra.yml}"
+CUSTOM_DOMAIN_SSL_HELPER="${CUSTOM_DOMAIN_SSL_HELPER:-/usr/local/bin/gomail-custom-domain-ssl}"
+CUSTOM_DOMAIN_SSL_SUDOERS="${CUSTOM_DOMAIN_SSL_SUDOERS:-/etc/sudoers.d/gomail-custom-domain-ssl}"
 RUN_TESTS="${RUN_TESTS:-false}"
 RESTART_INFRA="${RESTART_INFRA:-false}"
 DEPLOY_ARCHIVE="${DEPLOY_ARCHIVE:-}"
@@ -102,6 +104,16 @@ sync_source() {
     --exclude '.env.dev' \
     "$SOURCE_DIR/" "$APP_ROOT/"
   chown -R "$APP_USER:$APP_GROUP" "$APP_ROOT"
+}
+
+install_custom_domain_ssl_helper() {
+  log "installing custom domain SSL helper"
+  install -o root -g root -m 0755 "$APP_ROOT/scripts/custom-domain-ssl.sh" "$CUSTOM_DOMAIN_SSL_HELPER"
+  cat >"$CUSTOM_DOMAIN_SSL_SUDOERS" <<EOF
+$APP_USER ALL=(root) NOPASSWD: $CUSTOM_DOMAIN_SSL_HELPER provision *, $CUSTOM_DOMAIN_SSL_HELPER remove *
+EOF
+  chmod 0440 "$CUSTOM_DOMAIN_SSL_SUDOERS"
+  visudo -cf "$CUSTOM_DOMAIN_SSL_SUDOERS" >/dev/null
 }
 
 maybe_run_tests() {
@@ -202,6 +214,7 @@ main() {
   ensure_prerequisites
   ensure_layout
   sync_source
+  install_custom_domain_ssl_helper
   maybe_run_tests
   build_release
   restart_services

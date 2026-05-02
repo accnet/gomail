@@ -116,6 +116,8 @@ sudo STATIC_SITES_BASE_DOMAIN=sites.example.net \
 
 This script enables nginx HTTPS for `*.STATIC_SITES_BASE_DOMAIN` and redirects wildcard HTTP traffic to HTTPS. The `cloudflare` mode installs `python3-certbot-dns-cloudflare` if needed, requests a certificate for both `STATIC_SITES_BASE_DOMAIN` and `*.STATIC_SITES_BASE_DOMAIN`, then wires it into nginx.
 
+For exact custom domains assigned through the app, the native nginx/systemd install now also installs a root-owned helper plus a restricted sudoers rule so the `Active SSL` action can provision per-domain nginx + Certbot certificates automatically.
+
 For later code updates on the VPS, use [upgrade.sh](./upgrade.sh). It syncs the new checkout into the deployed app directory, rebuilds binaries, refreshes Docker infra, restarts the `systemd` services, and verifies local health checks.
 
 ```sh

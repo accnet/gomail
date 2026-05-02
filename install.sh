@@ -12,6 +12,8 @@ LOG_DIR="${LOG_DIR:-/var/log/gomail}"
 DATA_ROOT="${DATA_ROOT:-/var/lib/gomail/data}"
 COMPOSE_FILE="${COMPOSE_FILE:-$INSTALL_ROOT/docker-compose.infra.yml}"
 NGINX_SITE="${NGINX_SITE:-/etc/nginx/sites-available/gomail.conf}"
+CUSTOM_DOMAIN_SSL_HELPER="${CUSTOM_DOMAIN_SSL_HELPER:-/usr/local/bin/gomail-custom-domain-ssl}"
+CUSTOM_DOMAIN_SSL_SUDOERS="${CUSTOM_DOMAIN_SSL_SUDOERS:-/etc/sudoers.d/gomail-custom-domain-ssl}"
 SYSTEMD_DIR="/etc/systemd/system"
 GO_VERSION="${GO_VERSION:-1.26.1}"
 SSH_PORT="${SSH_PORT:-22}"
@@ -258,6 +260,16 @@ prepare_directories() {
   chown -R "$APP_USER:$APP_GROUP" "$INSTALL_ROOT" "$LOG_DIR" /var/lib/gomail
 }
 
+install_custom_domain_ssl_helper() {
+  log "installing custom domain SSL helper"
+  install -o root -g root -m 0755 "$APP_ROOT/scripts/custom-domain-ssl.sh" "$CUSTOM_DOMAIN_SSL_HELPER"
+  cat >"$CUSTOM_DOMAIN_SSL_SUDOERS" <<EOF
+$APP_USER ALL=(root) NOPASSWD: $CUSTOM_DOMAIN_SSL_HELPER provision *, $CUSTOM_DOMAIN_SSL_HELPER remove *
+EOF
+  chmod 0440 "$CUSTOM_DOMAIN_SSL_SUDOERS"
+  visudo -cf "$CUSTOM_DOMAIN_SSL_SUDOERS" >/dev/null
+}
+
 sync_source() {
   log "copying repository into $APP_ROOT"
   rsync -a --delete \
@@ -324,6 +336,9 @@ STATIC_SITES_MAX_EXTRACTED_BYTES=209715200
 STATIC_SITES_MAX_FILE_COUNT=5000
 STATIC_SITES_BASE_DOMAIN=$STATIC_SITES_BASE_DOMAIN
 STATIC_SERVER_ADDR=127.0.0.1:8090
+STATIC_SITES_SSL_PROVIDER=command
+STATIC_SITES_SSL_ISSUE_COMMAND=sudo $CUSTOM_DOMAIN_SSL_HELPER provision
+STATIC_SITES_SSL_CLEANUP_COMMAND=sudo $CUSTOM_DOMAIN_SSL_HELPER remove
 
 TRAEFIK_DYNAMIC_CONF_DIR=$DATA_ROOT/traefik-dynamic/generated
 TRAEFIK_PUBLIC_IP=$PUBLIC_IP
@@ -620,6 +635,7 @@ main() {
   collect_config
   prepare_directories
   sync_source
+  install_custom_domain_ssl_helper
   write_env_file
   write_infra_compose
   build_binaries

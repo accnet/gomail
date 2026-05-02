@@ -68,6 +68,9 @@ type Config struct {
 	StaticSitesMaxFileCount      int
 	StaticSitesBaseDomain        string
 	StaticServerAddr             string
+	StaticSitesSSLProvider       string
+	StaticSitesSSLIssueCommand   string
+	StaticSitesSSLCleanupCommand string
 	TraefikDynamicConfDir        string
 	TraefikPublicIP              string
 
@@ -154,6 +157,9 @@ func Load() (Config, error) {
 		StaticSitesMaxFileCount:         envInt("STATIC_SITES_MAX_FILE_COUNT", 5000),
 		StaticSitesBaseDomain:           env("STATIC_SITES_BASE_DOMAIN", "localhost"),
 		StaticServerAddr:                env("STATIC_SERVER_ADDR", ":8090"),
+		StaticSitesSSLProvider:          env("STATIC_SITES_SSL_PROVIDER", "auto"),
+		StaticSitesSSLIssueCommand:      env("STATIC_SITES_SSL_ISSUE_COMMAND", ""),
+		StaticSitesSSLCleanupCommand:    env("STATIC_SITES_SSL_CLEANUP_COMMAND", ""),
 		TraefikDynamicConfDir:           env("TRAEFIK_DYNAMIC_CONF_DIR", "./data/traefik-dynamic"),
 		TraefikPublicIP:                 env("TRAEFIK_PUBLIC_IP", ""),
 
