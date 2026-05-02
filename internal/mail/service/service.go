@@ -64,15 +64,9 @@ func (p Pipeline) Ingest(ctx context.Context, inbox db.Inbox, user db.User, from
 		if err := tx.Create(&email).Error; err != nil {
 			return err
 		}
-		rawPath, err := p.Store.SaveRaw(user.ID, email.ID, raw)
-		if err != nil {
-			return err
-		}
-		saved = append(saved, rawPath)
-		if err := tx.Model(&email).Update("raw_storage_path", rawPath).Error; err != nil {
-			return err
-		}
 		var total int64 = int64(len(raw))
+
+
 		for _, part := range parsed.Attachments {
 			if total+part.Size > int64(user.MaxAttachmentSizeMB)*1024*1024+int64(len(raw)) {
 				return errors.New("attachment size limit exceeded")

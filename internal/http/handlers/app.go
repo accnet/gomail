@@ -759,12 +759,8 @@ func (a App) adminDeleteUser(c *gin.Context) {
 			if err := tx.Model(&db.Email{}).Unscoped().Where("inbox_id IN ?", inboxIDs).Pluck("id", &emailIDs).Error; err != nil {
 				return err
 			}
-			var rawPaths []string
-			if err := tx.Model(&db.Email{}).Unscoped().Where("inbox_id IN ? AND raw_storage_path <> ''", inboxIDs).Pluck("raw_storage_path", &rawPaths).Error; err != nil {
-				return err
-			}
-			files = append(files, rawPaths...)
 		}
+
 
 		if len(emailIDs) > 0 {
 			var attachmentPaths []string
