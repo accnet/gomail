@@ -3,6 +3,7 @@ package staticprojects
 import (
 	"archive/zip"
 	"bytes"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -494,6 +495,18 @@ func TestThumbnailWorkerProcessesActivePublishedProjects(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(activeRoot, "thumbnail.png")); err != nil {
 		t.Fatalf("expected active thumbnail file: %v", err)
 	}
+	thumbFile, err := os.Open(filepath.Join(activeRoot, "thumbnail.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer thumbFile.Close()
+	thumbImg, err := png.DecodeConfig(thumbFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if thumbImg.Width != 1280 || thumbImg.Height != 720 {
+		t.Fatalf("thumbnail dimensions = %dx%d, want 1280x720", thumbImg.Width, thumbImg.Height)
+	}
 
 	var disabled db.StaticProject
 	if err := database.First(&disabled, "id = ?", disabledID).Error; err != nil {
@@ -501,6 +514,59 @@ func TestThumbnailWorkerProcessesActivePublishedProjects(t *testing.T) {
 	}
 	if disabled.ThumbnailStatus != "pending" {
 		t.Fatalf("disabled thumbnail status = %q, want pending", disabled.ThumbnailStatus)
+	}
+}
+
+func TestThumbnailWorkerRefreshesLegacyReadyPlaceholder(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AutoMigrate(&db.User{}, &db.StaticProject{}); err != nil {
+		t.Fatal(err)
+	}
+
+	userID := uuid.New()
+	projectID := uuid.New()
+	root := t.TempDir()
+	projectRoot := filepath.Join(root, "legacy")
+	if err := os.MkdirAll(projectRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	thumbnailPath := filepath.Join(projectRoot, "thumbnail.png")
+	legacyPNG := []byte{
+		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+		0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00,
+		0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x60, 0x00, 0x00, 0x00,
+		0x02, 0x00, 0x01, 0xe2, 0x21, 0xbc, 0x33, 0x00, 0x00, 0x00, 0x00, 0x49,
+		0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+	}
+	if err := os.WriteFile(thumbnailPath, legacyPNG, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Create(&db.User{ID: userID, Email: "legacy@example.com", MaxWebsites: 1}).Error; err != nil {
+		t.Fatal(err)
+	}
+	project := db.StaticProject{ID: projectID, UserID: userID, Name: "Legacy", Subdomain: "legacy", RootFolder: projectRoot, Status: "published", ThumbnailStatus: "ready", ThumbnailPath: thumbnailPath, IsActive: true}
+	if err := database.Create(&project).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	worker := NewThumbnailWorker(database, root, func(string) string { return "" })
+	worker.processPending()
+
+	thumbFile, err := os.Open(thumbnailPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer thumbFile.Close()
+	thumbImg, err := png.DecodeConfig(thumbFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if thumbImg.Width != 1280 || thumbImg.Height != 720 {
+		t.Fatalf("thumbnail dimensions = %dx%d, want 1280x720", thumbImg.Width, thumbImg.Height)
 	}
 }
 

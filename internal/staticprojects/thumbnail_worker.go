@@ -3,10 +3,15 @@ package staticprojects
 import (
 	"context"
 	"errors"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/png"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -53,17 +58,60 @@ func (w *ThumbnailWorker) processPending() {
 		ID         uuid.UUID
 		Subdomain  string
 		RootFolder string
+		ThumbnailPath string
+		ThumbnailStatus string
 	}
 
 	w.DB.Table("static_projects").
-		Select("id, subdomain, root_folder").
+		Select("id, subdomain, root_folder, thumbnail_path, thumbnail_status").
 		Where("status = ? AND is_active = ? AND deleted_at IS NULL", "published", true).
-		Where("thumbnail_status IN ?", []string{"pending", "failed", ""}).
 		Find(&projects)
 
 	for _, p := range projects {
+		if !w.needsGeneration(p.ThumbnailStatus, p.RootFolder, p.ThumbnailPath) {
+			continue
+		}
 		w.generateThumbnail(p.ID, p.Subdomain, p.RootFolder)
 	}
+}
+
+func (w *ThumbnailWorker) needsGeneration(status, rootFolder, thumbnailPath string) bool {
+	switch status {
+	case "pending", "failed", "", "processing":
+		return true
+	case "ready":
+		return w.isLegacyPlaceholder(rootFolder, thumbnailPath)
+	default:
+		return true
+	}
+}
+
+func (w *ThumbnailWorker) isLegacyPlaceholder(rootFolder, thumbnailPath string) bool {
+	path := strings.TrimSpace(thumbnailPath)
+	if path == "" {
+		path = filepath.Join(rootFolder, "thumbnail.png")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return true
+	}
+	if info.Size() <= 128 {
+		return true
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return true
+	}
+	defer file.Close()
+
+	config, format, err := image.DecodeConfig(file)
+	if err != nil {
+		return true
+	}
+	if config.Width <= 1 || config.Height <= 1 {
+		return true
+	}
+	return strings.ToLower(format) == "png" && config.Width == 1 && config.Height == 1
 }
 
 // generateThumbnail generates a thumbnail for the given project.
@@ -154,13 +202,44 @@ func (w *ThumbnailWorker) generatePlaceholder(outputPath string) error {
 		return err
 	}
 
-	png := []byte{
-		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
-		0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-		0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00,
-		0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x60, 0x00, 0x00, 0x00,
-		0x02, 0x00, 0x01, 0xe2, 0x21, 0xbc, 0x33, 0x00, 0x00, 0x00, 0x00, 0x49,
-		0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+	const (
+		width  = 1280
+		height = 720
+	)
+
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	for y := 0; y < height; y++ {
+		shade := uint8(232 - (y * 28 / height))
+		band := uint8(244 - (y * 18 / height))
+		for x := 0; x < width; x++ {
+			img.SetRGBA(x, y, color.RGBA{R: shade, G: shade + 8, B: band, A: 255})
+		}
 	}
-	return os.WriteFile(outputPath, png, 0644)
+
+	browserRect := image.Rect(96, 72, width-96, height-92)
+	draw.Draw(img, browserRect, &image.Uniform{C: color.RGBA{R: 255, G: 255, B: 255, A: 255}}, image.Point{}, draw.Src)
+	draw.Draw(img, image.Rect(browserRect.Min.X, browserRect.Min.Y, browserRect.Max.X, browserRect.Min.Y+72), &image.Uniform{C: color.RGBA{R: 226, G: 232, B: 240, A: 255}}, image.Point{}, draw.Src)
+
+	accent := color.RGBA{R: 37, G: 99, B: 235, A: 255}
+	muted := color.RGBA{R: 203, G: 213, B: 225, A: 255}
+	soft := color.RGBA{R: 241, G: 245, B: 249, A: 255}
+
+	for i := 0; i < 3; i++ {
+		dot := image.Rect(browserRect.Min.X+28+(i*24), browserRect.Min.Y+26, browserRect.Min.X+42+(i*24), browserRect.Min.Y+40)
+		draw.Draw(img, dot, &image.Uniform{C: muted}, image.Point{}, draw.Src)
+	}
+
+	draw.Draw(img, image.Rect(browserRect.Min.X+28, browserRect.Min.Y+110, browserRect.Max.X-28, browserRect.Min.Y+356), &image.Uniform{C: soft}, image.Point{}, draw.Src)
+	draw.Draw(img, image.Rect(browserRect.Min.X+28, browserRect.Min.Y+388, browserRect.Max.X-28, browserRect.Min.Y+434), &image.Uniform{C: accent}, image.Point{}, draw.Src)
+	draw.Draw(img, image.Rect(browserRect.Min.X+28, browserRect.Min.Y+462, browserRect.Min.X+380, browserRect.Min.Y+492), &image.Uniform{C: muted}, image.Point{}, draw.Src)
+	draw.Draw(img, image.Rect(browserRect.Min.X+28, browserRect.Min.Y+510, browserRect.Max.X-240, browserRect.Min.Y+536), &image.Uniform{C: muted}, image.Point{}, draw.Src)
+	draw.Draw(img, image.Rect(browserRect.Min.X+28, browserRect.Min.Y+552, browserRect.Max.X-320, browserRect.Min.Y+578), &image.Uniform{C: muted}, image.Point{}, draw.Src)
+
+	file, err := os.Create(outputPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	return png.Encode(file, img)
 }
