@@ -1166,8 +1166,14 @@ async function renderEmail() {
       <!-- Column 2: Email List -->
       <div class="email-panel">
         <div class="email-panel-header">
-          <h3>${selectedInbox ? escapeHTML(selectedInbox.address) : "All Mail"}</h3>
-          <p class="sub">${state.emailPagination?.total ?? filteredEmails.length} messages</p>
+          <div>
+            <h3>${selectedInbox ? escapeHTML(selectedInbox.address) : "All Mail"}</h3>
+            <p class="sub">${state.emailPagination?.total ?? filteredEmails.length} messages</p>
+          </div>
+          <button id="refreshEmailsBtn" class="icon-btn" title="Refresh">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          </button>
+        </div>
         </div>
         <div class="email-panel-body">
           <div style="display:flex;gap:8px;align-items:center;padding:8px 8px 12px">
@@ -1273,6 +1279,10 @@ async function renderEmail() {
     });
   };
 
+  document.getElementById("refreshEmailsBtn").onclick = async () => {
+    await renderEmail();
+  };
+
   document.getElementById("toggleUnreadBtn").onclick = async () => {
     state.emailUnreadOnly = !state.emailUnreadOnly;
     state.emailPage = 1;
@@ -1288,6 +1298,7 @@ async function renderEmail() {
     state.emailPage += 1;
     await renderEmail();
   };
+
 
   document.querySelectorAll("[data-mailbox-id]").forEach((button) => {
     button.onclick = async () => {
