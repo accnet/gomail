@@ -55,10 +55,10 @@ func (w *ThumbnailWorker) Run(ctx context.Context, interval time.Duration) {
 // processPending finds projects needing thumbnail generation.
 func (w *ThumbnailWorker) processPending() {
 	var projects []struct {
-		ID         uuid.UUID
-		Subdomain  string
-		RootFolder string
-		ThumbnailPath string
+		ID              uuid.UUID
+		Subdomain       string
+		RootFolder      string
+		ThumbnailPath   string
 		ThumbnailStatus string
 	}
 

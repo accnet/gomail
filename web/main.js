@@ -269,6 +269,72 @@ function badge(status) {
   return `<span class="badge ${cls[status] || "badge-default"}">${status}</span>`;
 }
 
+function renderDomainCheckCell({ status, detail = "", verifyAttr = "", verifyLabel = "Verify", extraAction = "" }) {
+  const safeStatus = status || "pending";
+  const safeDetail = detail ? `<div style="font-size:12px;color:var(--color-text-tertiary);margin-top:6px">${escapeHTML(detail)}</div>` : "";
+  const verifyButton = verifyAttr
+    ? `<button ${verifyAttr} class="btn btn-secondary btn-xs">${verifyLabel}</button>`
+    : "";
+  const actions = verifyButton || extraAction
+    ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">${verifyButton}${extraAction}</div>`
+    : "";
+  return `
+    <div style="min-width:140px">
+      ${badge(safeStatus)}
+      ${safeDetail}
+      ${actions}
+    </div>
+  `;
+}
+
+function normalizeDomainName(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function findWebsiteByDomain(domainName) {
+  const normalized = normalizeDomainName(domainName);
+  if (!normalized) return null;
+  return (state.websites || []).find((site) => normalizeDomainName(site.assigned_domain) === normalized) || null;
+}
+
+function renderDomainWebsiteCell(domain, site) {
+  let detail = domain.a_record_result || "Check website A/AAAA routing";
+  let extraAction = "";
+
+  if (site) {
+    detail = `${detail}${detail ? " · " : ""}Website: ${site.name}`;
+    const sslLabel = site.domain_binding_status === "ssl_active" ? "SSL Active" : "SSL";
+    const disabled = domain.a_record_status !== "verified" || site.domain_binding_status === "ssl_active" ? "disabled" : "";
+    extraAction = `<button data-domain-activate-ssl="${site.id}" class="btn btn-secondary btn-xs" ${disabled}>${sslLabel}</button>`;
+  }
+
+  return renderDomainCheckCell({
+    status: domain.a_record_status,
+    detail,
+    verifyAttr: `data-domain-verify-a="${domain.id}"`,
+    extraAction
+  });
+}
+
+function renderDomainEmailCheckCell(domain) {
+  const spfStatus = domain.spf_status || "pending";
+  const dkimStatus = domain.dkim_status || "pending";
+  const detail = `SPF: ${spfStatus} · DKIM: ${dkimStatus}`;
+  return `
+    <div style="min-width:170px">
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        ${badge(spfStatus)}
+        ${badge(dkimStatus)}
+      </div>
+      <div style="font-size:12px;color:var(--color-text-tertiary);margin-top:6px">${escapeHTML(detail)}</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
+        <button data-domain-verify-email-auth="${domain.id}" class="btn btn-secondary btn-xs">Verify</button>
+        <button data-domain-email-auth="${domain.id}" class="btn btn-secondary btn-xs">DNS</button>
+      </div>
+    </div>
+  `;
+}
+
 // Derive the base domain for static site URLs from window.location.
 // e.g. "app.example.com" → "example.com", "localhost:8080" → "localhost"
 function getBaseDomain() {
@@ -682,7 +748,12 @@ async function renderDashboard() {
 // --- Domains ---
 async function renderDomains() {
   setView("domains");
-  state.domains = await api("/domains");
+  const [domains, websites] = await Promise.all([
+    api("/domains"),
+    api("/static-projects")
+  ]);
+  state.domains = domains || [];
+  state.websites = websites || [];
   const mxTarget = state.domains[0]?.mx_target || "Configured on server";
   els.sidebarMx.textContent = mxTarget;
 
@@ -704,9 +775,10 @@ async function renderDomains() {
             <thead>
               <tr>
                 <th>Domain</th>
-                <th>MX</th>
-                <th>A Record</th>
-                <th>Status</th>
+                <th>Website A</th>
+                <th>SMTP MX</th>
+                <th>SMTP SPF/DKIM</th>
+                <th>Overall</th>
                 <th>Last Verified</th>
                 <th>Actions</th>
               </tr>
@@ -718,20 +790,23 @@ async function renderDomains() {
                     <p style="font-weight:500">${escapeHTML(domain.name)}</p>
                     ${domain.verification_error ? `<p style="font-size:12px;color:var(--color-danger);margin-top:2px">${escapeHTML(domain.verification_error)}</p>` : ""}
                   </td>
-                  <td style="font-size:13px;color:var(--color-text-secondary)">${escapeHTML(domain.mx_target)}</td>
-                  <td style="font-size:13px">
-                    ${domain.a_record_status === "verified" ? `<span style="color:var(--color-success)" title="${escapeHTML(domain.a_record_result || '')}">✓ ${escapeHTML(domain.a_record_result || '')}</span>` : domain.a_record_status === "failed" ? `<span style="color:var(--color-danger)" title="${escapeHTML(domain.a_record_result || '')}">✗ ${escapeHTML(domain.a_record_result || '')}</span>` : `<span style="color:var(--color-text-secondary)">—</span>`}
+                  <td>
+                    ${renderDomainWebsiteCell(domain, findWebsiteByDomain(domain.name))}
+                  </td>
+                  <td>
+                    ${renderDomainCheckCell({
+                      status: domain.mx_status || domain.status,
+                      detail: domain.mx_target || "Configured on server",
+                      verifyAttr: `data-domain-verify-mx="${domain.id}"`
+                    })}
+                  </td>
+                  <td>
+                    ${renderDomainEmailCheckCell(domain)}
                   </td>
                   <td>${badge(domain.warning_status || domain.status)}</td>
                   <td style="font-size:13px;color:var(--color-text-secondary)">${relative(domain.last_verified_at)}</td>
                   <td>
                     <div style="display:flex;gap:4px">
-                      <button data-domain-verify="${domain.id}" class="icon-btn" title="Verify">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                      </button>
-                      <button data-domain-email-auth="${domain.id}" class="icon-btn" title="SPF/DKIM">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3v8z"/><path d="m9 12 2 2 4-5"/></svg>
-                      </button>
                       <button data-domain-delete="${domain.id}" class="icon-btn" title="Delete" style="color:var(--color-danger)">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
                       </button>
@@ -740,7 +815,7 @@ async function renderDomains() {
                 </tr>
               `).join("") : `
                 <tr>
-                  <td colspan="6">
+                  <td colspan="7">
                     <div class="empty-state">
                       <div class="empty-state-icon">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
@@ -785,10 +860,40 @@ async function renderDomains() {
     `);
     document.getElementById("domainForm").onsubmit = submitDomainForm;
   };
-  document.querySelectorAll("[data-domain-verify]").forEach((button) => {
+  document.querySelectorAll("[data-domain-verify-a]").forEach((button) => {
     button.onclick = async () => {
       try {
-        await api(`/domains/${button.dataset.domainVerify}/verify`, { method: "POST" });
+        await api(`/domains/${button.dataset.domainVerifyA}/verify-a`, { method: "POST" });
+        await renderDomains();
+      } catch (error) {
+        alert(error.message);
+      }
+    };
+  });
+  document.querySelectorAll("[data-domain-activate-ssl]").forEach((button) => {
+    button.onclick = async () => {
+      try {
+        await api(`/static-projects/${button.dataset.domainActivateSsl}/domain/active-ssl`, { method: "POST" });
+        await renderDomains();
+      } catch (error) {
+        alert(error.message);
+      }
+    };
+  });
+  document.querySelectorAll("[data-domain-verify-mx]").forEach((button) => {
+    button.onclick = async () => {
+      try {
+        await api(`/domains/${button.dataset.domainVerifyMx}/verify-mx`, { method: "POST" });
+        await renderDomains();
+      } catch (error) {
+        alert(error.message);
+      }
+    };
+  });
+  document.querySelectorAll("[data-domain-verify-email-auth]").forEach((button) => {
+    button.onclick = async () => {
+      try {
+        await api(`/domains/${button.dataset.domainVerifyEmailAuth}/email-auth/verify`, { method: "POST" });
         await renderDomains();
       } catch (error) {
         alert(error.message);
@@ -2192,7 +2297,6 @@ function renderWebsiteDomainsTab(project) {
           </div>
           <div style="display:flex;gap:8px;margin-top:16px">
             <button id="checkDomainIPBtn" class="btn btn-secondary btn-sm">Check DNS</button>
-            <button id="activeSSLBtn" class="btn btn-secondary btn-sm">Active SSL</button>
             <button id="unassignDomainBtn" class="btn btn-ghost btn-sm" style="color:var(--color-danger)">Unassign</button>
           </div>
         ` : `
@@ -2337,23 +2441,12 @@ function wireDomainHandlers(project) {
 
   // Wire existing domain actions
   const checkBtn = document.getElementById("checkDomainIPBtn");
-  const sslBtn = document.getElementById("activeSSLBtn");
   const unassignBtn = document.getElementById("unassignDomainBtn");
 
   if (checkBtn) {
     checkBtn.onclick = async () => {
       try {
         const result = await api(`/static-projects/${projectID}/domain/check-ip`, { method: "POST" });
-        await renderWebsiteSettings(projectID);
-      } catch (error) {
-        alert(error.message);
-      }
-    };
-  }
-  if (sslBtn) {
-    sslBtn.onclick = async () => {
-      try {
-        const result = await api(`/static-projects/${projectID}/domain/active-ssl`, { method: "POST" });
         await renderWebsiteSettings(projectID);
       } catch (error) {
         alert(error.message);

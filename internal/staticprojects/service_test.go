@@ -418,6 +418,25 @@ func TestDomainAssignmentAndActiveSSL(t *testing.T) {
 		t.Fatalf("ActiveSSL before DNS check error = %v, want ErrSSLConditionNotMet", err)
 	}
 
+	if err := database.Model(&db.Domain{}).Where("id = ?", verifiedID).Update("a_record_status", db.ARecordStatusVerified).Error; err != nil {
+		t.Fatal(err)
+	}
+	project, err = svc.ActiveSSL(userID, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.DomainBindingStatus != "ssl_active" || project.DomainLastDNSResult != "ok" {
+		t.Fatalf("ActiveSSL via verified domain status = %q dns = %q", project.DomainBindingStatus, project.DomainLastDNSResult)
+	}
+
+	if err := database.Model(&db.StaticProject{}).Where("id = ?", projectID).Updates(map[string]any{
+		"domain_binding_status":  db.DomainBindingStatusAssigned,
+		"domain_tls_enabled_at":  nil,
+		"domain_last_dns_result": "",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
 	if err := database.Model(&db.StaticProject{}).Where("id = ?", projectID).Update("domain_last_dns_result", "ok").Error; err != nil {
 		t.Fatal(err)
 	}

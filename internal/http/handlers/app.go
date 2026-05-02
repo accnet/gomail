@@ -69,6 +69,8 @@ func (a App) Router() *gin.Engine {
 	protected.POST("/domains", a.createDomain)
 	protected.GET("/domains/:id", a.getDomain)
 	protected.POST("/domains/:id/verify", a.verifyDomain)
+	protected.POST("/domains/:id/verify-a", a.verifyDomainA)
+	protected.POST("/domains/:id/verify-mx", a.verifyDomainMX)
 	protected.GET("/domains/:id/email-auth", a.getDomainEmailAuth)
 	protected.POST("/domains/:id/email-auth/dkim/generate", a.generateDomainDKIM)
 	protected.POST("/domains/:id/email-auth/verify", a.verifyDomainEmailAuth)
@@ -235,7 +237,12 @@ func (a App) listDomains(c *gin.Context) {
 	user := mw.CurrentUser(c)
 	var rows []db.Domain
 	a.DB.Where("user_id = ?", user.ID).Order("created_at desc").Find(&rows)
-	response.OK(c, rows)
+	items := make([]domainListItem, 0, len(rows))
+	for _, row := range rows {
+		authRow, _ := loadOptionalDomainEmailAuth(a.DB, row.ID)
+		items = append(items, buildDomainListItem(row, authRow))
+	}
+	response.OK(c, items)
 }
 
 func (a App) createDomain(c *gin.Context) {
@@ -277,21 +284,82 @@ func (a App) verifyDomain(c *gin.Context) {
 		return
 	}
 	ok, errMsg := a.Verifier.Verify(c.Request.Context(), row.Name)
-	status := "failed"
 	if ok {
-		status = "verified"
 		errMsg = ""
-	} else if row.Status == "verified" {
-		status = "verified"
+	}
+	row = a.applyDomainMXVerification(row, ok, errMsg)
+	aStatus, aResult, aCheckedAt := verifyDomainARecord(c.Request.Context(), a.Verifier, a.Config, row.Name)
+	row.ARecordStatus = aStatus
+	row.ARecordResult = aResult
+	row.ARecordCheckAt = aCheckedAt
+	authRow, _ := loadOptionalDomainEmailAuth(a.DB, row.ID)
+	row.WarningStatus = deriveDomainWarningStatus(row, authRow)
+	a.DB.Model(&row).Updates(map[string]any{
+		"warning_status":    row.WarningStatus,
+		"a_record_status":   row.ARecordStatus,
+		"a_record_result":   row.ARecordResult,
+		"a_record_check_at": row.ARecordCheckAt,
+	})
+	payload, _ := json.Marshal(gin.H{"ok": ok, "error": errMsg, "warning": row.WarningStatus, "a_record_status": row.ARecordStatus, "a_record_result": aResult, "mx_status": row.Status})
+	a.DB.Create(&db.DomainEvent{DomainID: row.ID, Type: "domain.verify", Payload: payload})
+	a.DB.First(&row, "id = ?", row.ID)
+	if (ok || row.ARecordStatus == db.ARecordStatusVerified) && a.Redis != nil {
+		_ = realtime.NewPublisher(a.Redis).Publish(c.Request.Context(), realtime.Event{Type: "domain.verified", UserID: user.ID, Data: gin.H{"domain_id": row.ID, "name": row.Name}})
+	}
+	response.OK(c, buildDomainListItem(row, mustLoadOptionalDomainEmailAuth(a.DB, row.ID)))
+	return
+}
+
+func (a App) verifyDomainA(c *gin.Context) {
+	user := mw.CurrentUser(c)
+	var row db.Domain
+	if ownerFirst(a.DB, c.Param("id"), user.ID, &row) != nil {
+		response.Error(c, http.StatusNotFound, "not_found", "domain not found")
+		return
 	}
 	aStatus, aResult, aCheckedAt := verifyDomainARecord(c.Request.Context(), a.Verifier, a.Config, row.Name)
+	row.ARecordStatus = aStatus
+	row.ARecordResult = aResult
+	row.ARecordCheckAt = aCheckedAt
+	authRow, _ := loadOptionalDomainEmailAuth(a.DB, row.ID)
+	row.WarningStatus = deriveDomainWarningStatus(row, authRow)
+	a.DB.Model(&row).Updates(map[string]any{
+		"warning_status":    row.WarningStatus,
+		"a_record_status":   row.ARecordStatus,
+		"a_record_result":   row.ARecordResult,
+		"a_record_check_at": row.ARecordCheckAt,
+	})
+	a.DB.First(&row, "id = ?", row.ID)
+	response.OK(c, buildDomainListItem(row, mustLoadOptionalDomainEmailAuth(a.DB, row.ID)))
+}
+
+func (a App) verifyDomainMX(c *gin.Context) {
+	user := mw.CurrentUser(c)
+	var row db.Domain
+	if ownerFirst(a.DB, c.Param("id"), user.ID, &row) != nil {
+		response.Error(c, http.StatusNotFound, "not_found", "domain not found")
+		return
+	}
+	ok, errMsg := a.Verifier.Verify(c.Request.Context(), row.Name)
+	if ok {
+		errMsg = ""
+	}
+	row = a.applyDomainMXVerification(row, ok, errMsg)
+	response.OK(c, buildDomainListItem(row, mustLoadOptionalDomainEmailAuth(a.DB, row.ID)))
+}
+
+func (a App) applyDomainMXVerification(row db.Domain, ok bool, errMsg string) db.Domain {
+	status := db.DomainStatusFailed
+	if ok {
+		status = db.DomainStatusVerified
+		errMsg = ""
+	} else if row.Status == db.DomainStatusVerified {
+		status = db.DomainStatusVerified
+	}
 	now := time.Now()
 	row.Status = status
 	row.VerificationError = errMsg
 	row.LastVerifiedAt = &now
-	row.ARecordStatus = aStatus
-	row.ARecordResult = aResult
-	row.ARecordCheckAt = aCheckedAt
 	authRow, _ := loadOptionalDomainEmailAuth(a.DB, row.ID)
 	row.WarningStatus = deriveDomainWarningStatus(row, authRow)
 	a.DB.Model(&row).Updates(map[string]any{
@@ -299,17 +367,39 @@ func (a App) verifyDomain(c *gin.Context) {
 		"warning_status":     row.WarningStatus,
 		"last_verified_at":   row.LastVerifiedAt,
 		"verification_error": row.VerificationError,
-		"a_record_status":    row.ARecordStatus,
-		"a_record_result":    row.ARecordResult,
-		"a_record_check_at":  row.ARecordCheckAt,
 	})
-	payload, _ := json.Marshal(gin.H{"ok": ok, "error": errMsg, "warning": row.WarningStatus, "a_record_status": row.ARecordStatus, "a_record_result": row.ARecordResult})
-	a.DB.Create(&db.DomainEvent{DomainID: row.ID, Type: "domain.verify", Payload: payload})
 	a.DB.First(&row, "id = ?", row.ID)
-	if ok && a.Redis != nil {
-		_ = realtime.NewPublisher(a.Redis).Publish(c.Request.Context(), realtime.Event{Type: "domain.verified", UserID: user.ID, Data: gin.H{"domain_id": row.ID, "name": row.Name}})
+	return row
+}
+
+type domainListItem struct {
+	db.Domain
+	MXStatus   string `json:"mx_status"`
+	SPFStatus  string `json:"spf_status"`
+	DKIMStatus string `json:"dkim_status"`
+}
+
+func buildDomainListItem(row db.Domain, auth *db.DomainEmailAuth) domainListItem {
+	item := domainListItem{
+		Domain:     row,
+		MXStatus:   row.Status,
+		SPFStatus:  db.DomainAuthStatusPending,
+		DKIMStatus: db.DomainAuthStatusPending,
 	}
-	response.OK(c, row)
+	if auth != nil {
+		if auth.SPFStatus != "" {
+			item.SPFStatus = auth.SPFStatus
+		}
+		if auth.DKIMStatus != "" {
+			item.DKIMStatus = auth.DKIMStatus
+		}
+	}
+	return item
+}
+
+func mustLoadOptionalDomainEmailAuth(database *gorm.DB, domainID uuid.UUID) *db.DomainEmailAuth {
+	authRow, _ := loadOptionalDomainEmailAuth(database, domainID)
+	return authRow
 }
 
 func (a App) deleteDomain(c *gin.Context) {

@@ -822,7 +822,7 @@ func (s *Service) ActiveSSL(userID uuid.UUID, projectID uuid.UUID) (*ProjectResp
 	if project.AssignedDomain == "" {
 		return nil, ErrDomainNotAvailable
 	}
-	if project.DomainLastDNSResult != "ok" {
+	if !s.domainSSLReady(userID, &project) {
 		return nil, ErrSSLConditionNotMet
 	}
 
@@ -843,6 +843,35 @@ func (s *Service) ActiveSSL(userID uuid.UUID, projectID uuid.UUID) (*ProjectResp
 		WebsitesUsed:  used,
 		MaxWebsites:   max,
 	}, nil
+}
+
+func (s *Service) domainSSLReady(userID uuid.UUID, project *db.StaticProject) bool {
+	if project.DomainLastDNSResult == "ok" {
+		return true
+	}
+
+	var domain db.Domain
+	query := s.DB.Where("user_id = ?", userID)
+	if project.DomainID != nil {
+		query = query.Where("id = ?", *project.DomainID)
+	} else {
+		query = query.Where("name = ?", project.AssignedDomain)
+	}
+	if err := query.First(&domain).Error; err != nil {
+		return false
+	}
+	if domain.ARecordStatus != db.ARecordStatusVerified {
+		return false
+	}
+
+	now := time.Now()
+	project.DomainLastDNSResult = "ok"
+	project.DomainLastDNSCheckAt = &now
+	s.DB.Model(project).Updates(map[string]any{
+		"domain_last_dns_result":   project.DomainLastDNSResult,
+		"domain_last_dns_check_at": project.DomainLastDNSCheckAt,
+	})
+	return true
 }
 
 // writeTraefikConfig writes a Traefik dynamic config file for the custom domain.

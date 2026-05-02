@@ -484,6 +484,118 @@ func TestVerifyDomainUpdatesARecordStatus(t *testing.T) {
 	}
 }
 
+func TestListDomainsIncludesVerificationColumns(t *testing.T) {
+	app, database := newTestApp(t)
+	router := app.Router()
+
+	user := createUser(t, database, "domains-columns@test.local", true, false, false)
+	token := bearerToken(t, app, user)
+	domain := db.Domain{
+		UserID:             user.ID,
+		Name:               "columns-example.test",
+		Status:             db.DomainStatusVerified,
+		VerificationMethod: "mx",
+		MXTarget:           app.Config.MXTarget,
+		ARecordStatus:      db.ARecordStatusFailed,
+		ARecordResult:      "domain resolves to 203.0.113.11",
+	}
+	if err := database.Create(&domain).Error; err != nil {
+		t.Fatal(err)
+	}
+	authRow := db.DomainEmailAuth{
+		DomainID:   domain.ID,
+		SPFStatus:  db.DomainAuthStatusVerified,
+		DKIMStatus: db.DomainAuthStatusFailed,
+	}
+	if err := database.Create(&authRow).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	resp := doJSON(t, router, http.MethodGet, "/api/domains", nil, token)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("list domains status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	var body []map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body) != 1 {
+		t.Fatalf("expected 1 domain, got %d", len(body))
+	}
+	if got := body[0]["mx_status"]; got != db.DomainStatusVerified {
+		t.Fatalf("mx_status = %v, want %q", got, db.DomainStatusVerified)
+	}
+	if got := body[0]["spf_status"]; got != db.DomainAuthStatusVerified {
+		t.Fatalf("spf_status = %v, want %q", got, db.DomainAuthStatusVerified)
+	}
+	if got := body[0]["dkim_status"]; got != db.DomainAuthStatusFailed {
+		t.Fatalf("dkim_status = %v, want %q", got, db.DomainAuthStatusFailed)
+	}
+	if got := body[0]["a_record_status"]; got != db.ARecordStatusFailed {
+		t.Fatalf("a_record_status = %v, want %q", got, db.ARecordStatusFailed)
+	}
+}
+
+func TestVerifyDomainAAndMXIndependently(t *testing.T) {
+	app, database := newTestApp(t)
+	app.Config.TraefikPublicIP = "203.0.113.10"
+	app.Verifier = dns.Verifier{
+		MXTarget: app.Config.MXTarget,
+		Timeout:  time.Second,
+		Resolver: stubResolver{
+			target: app.Config.MXTarget,
+			ipRecords: map[string][]net.IPAddr{
+				"split-verify.test": {{IP: net.ParseIP("203.0.113.10")}},
+			},
+		},
+	}
+	router := app.Router()
+
+	user := createUser(t, database, "split-verify@test.local", true, false, false)
+	token := bearerToken(t, app, user)
+	domain := db.Domain{
+		UserID:             user.ID,
+		Name:               "split-verify.test",
+		Status:             db.DomainStatusPending,
+		VerificationMethod: "mx",
+		MXTarget:           app.Config.MXTarget,
+		ARecordStatus:      db.ARecordStatusPending,
+	}
+	if err := database.Create(&domain).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	aResp := doJSON(t, router, http.MethodPost, "/api/domains/"+domain.ID.String()+"/verify-a", nil, token)
+	if aResp.Code != http.StatusOK {
+		t.Fatalf("verify a status = %d body=%s", aResp.Code, aResp.Body.String())
+	}
+	var afterA db.Domain
+	if err := database.First(&afterA, "id = ?", domain.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if afterA.ARecordStatus != db.ARecordStatusVerified {
+		t.Fatalf("a_record_status after verify-a = %q", afterA.ARecordStatus)
+	}
+	if afterA.Status != db.DomainStatusPending {
+		t.Fatalf("mx/domain status after verify-a = %q, want pending", afterA.Status)
+	}
+
+	mxResp := doJSON(t, router, http.MethodPost, "/api/domains/"+domain.ID.String()+"/verify-mx", nil, token)
+	if mxResp.Code != http.StatusOK {
+		t.Fatalf("verify mx status = %d body=%s", mxResp.Code, mxResp.Body.String())
+	}
+	var afterMX db.Domain
+	if err := database.First(&afterMX, "id = ?", domain.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if afterMX.Status != db.DomainStatusVerified {
+		t.Fatalf("mx/domain status after verify-mx = %q, want verified", afterMX.Status)
+	}
+	if afterMX.ARecordStatus != db.ARecordStatusVerified {
+		t.Fatalf("a_record_status after verify-mx = %q, want preserved verified", afterMX.ARecordStatus)
+	}
+}
+
 type stubResolver struct {
 	target     string
 	txtRecords map[string][]string
