@@ -344,13 +344,10 @@ function renderDomainEmailCheckCell(domain) {
         ${badge(dkimStatus)}
       </div>
       <div class="domain-check-detail">${escapeHTML(detail)}</div>
-      <div class="domain-check-actions">
-        <button data-domain-verify-email-auth="${domain.id}" class="btn btn-secondary btn-xs">Verify</button>
-        <button data-domain-email-auth="${domain.id}" class="btn btn-secondary btn-xs">DNS</button>
-      </div>
     </div>
   `;
 }
+
 
 // Derive the base domain for static site URLs from window.location.
 // e.g. "app.example.com" → "example.com", "localhost:8080" → "localhost"
@@ -864,8 +861,12 @@ async function renderDomains() {
                         </button>
 
                         <div class="action-dots-menu hidden">
+                          <button data-domain-verify-email-auth="${domain.id}" class="action-dots-item">Verify SPF/DKIM</button>
+                          <button data-domain-email-auth="${domain.id}" class="action-dots-item">DNS records</button>
+                          <div style="height:1px;background:var(--color-border);margin:4px 0"></div>
                           <button data-domain-delete="${domain.id}" class="action-dots-item action-dots-danger">Delete</button>
                         </div>
+
                       </div>
                     </div>
                   </td>
