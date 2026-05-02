@@ -1017,34 +1017,50 @@ function renderDomainEmailAuthModal(domainId, domainName, payload) {
   const spf = payload.spf || {};
   const dkim = payload.dkim || {};
   els.modalBody.innerHTML = `
-    <div style="display:grid;gap:14px">
-      <div class="info-row">
-        <span class="info-row-label">Domain</span>
-        <span class="info-row-value">${escapeHTML(domainName)}</span>
+    <div style="display:grid;gap:12px">
+      <div style="display:flex;align-items:center;gap:8px;padding:10px 12px;background:var(--color-surface-hover);border-radius:var(--radius-md)">
+        <span style="font-size:13px;color:var(--color-text-secondary)">Domain</span>
+        <span style="font-size:13px;font-weight:600;color:var(--color-text)">${escapeHTML(domainName)}</span>
       </div>
-      <div style="display:grid;gap:10px">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
-          <h4 style="font-size:14px;font-weight:600">SPF</h4>
-          ${badge(auth.spf_status || "pending")}
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div style="display:grid;gap:6px;border:1px solid var(--color-border);border-radius:var(--radius-md);padding:10px">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+            <span style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;color:var(--color-text-tertiary)">SPF</span>
+            ${badge(auth.spf_status || "pending")}
+          </div>
+          ${spf.value ? `
+            <div style="font-size:11px;color:var(--color-text-tertiary)">${escapeHTML(spf.type || "TXT")} ${escapeHTML(spf.name || "")}</div>
+
+            <div style="display:flex;align-items:flex-start;gap:6px">
+              <pre style="flex:1;min-width:0;white-space:pre-wrap;word-break:break-all;font-size:11px;line-height:1.4;background:var(--color-surface);border:1px solid var(--color-border);border-radius:4px;padding:6px;margin:0">${escapeHTML(spf.value)}</pre>
+              <button type="button" class="btn btn-secondary btn-xs" data-copy-value="${escapeHTML(spf.value)}" style="flex-shrink:0">Copy</button>
+            </div>
+          ` : `<p style="font-size:12px;color:var(--color-text-tertiary);padding:4px 0">No SPF record yet.</p>`}
+          ${auth.spf_error ? `<p style="font-size:11px;color:var(--color-danger);padding:4px 6px;background:var(--color-danger-light);border-radius:4px">${escapeHTML(auth.spf_error)}</p>` : ""}
         </div>
-        ${renderDNSInstruction(spf)}
-        ${auth.spf_error ? `<p style="font-size:12px;color:var(--color-danger)">${escapeHTML(auth.spf_error)}</p>` : ""}
-      </div>
-      <div style="display:grid;gap:10px">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
-          <h4 style="font-size:14px;font-weight:600">DKIM</h4>
-          ${badge(auth.dkim_status || "pending")}
+        <div style="display:grid;gap:6px;border:1px solid var(--color-border);border-radius:var(--radius-md);padding:10px">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+            <span style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;color:var(--color-text-tertiary)">DKIM</span>
+            ${badge(auth.dkim_status || "pending")}
+          </div>
+          ${dkim.value ? `
+            <div style="font-size:11px;color:var(--color-text-tertiary)">${escapeHTML(dkim.type || "TXT")} ${escapeHTML(dkim.name || "")}</div>
+            <div style="display:flex;align-items:flex-start;gap:6px">
+              <pre style="flex:1;min-width:0;white-space:pre-wrap;word-break:break-all;font-size:11px;line-height:1.4;background:var(--color-surface);border:1px solid var(--color-border);border-radius:4px;padding:6px;margin:0">${escapeHTML(dkim.value)}</pre>
+              <button type="button" class="btn btn-secondary btn-xs" data-copy-value="${escapeHTML(dkim.value)}" style="flex-shrink:0">Copy</button>
+            </div>
+          ` : `<p style="font-size:12px;color:var(--color-text-tertiary);padding:4px 0">Need to generate DKIM.</p>`}
+          ${auth.dkim_error ? `<p style="font-size:11px;color:var(--color-danger);padding:4px 6px;background:var(--color-danger-light);border-radius:4px">${escapeHTML(auth.dkim_error)}</p>` : ""}
         </div>
-        ${dkim.value ? renderDNSInstruction(dkim) : `<p style="font-size:13px;color:var(--color-text-secondary)">Generate a DKIM selector to create the TXT record.</p>`}
-        ${auth.dkim_error ? `<p style="font-size:12px;color:var(--color-danger)">${escapeHTML(auth.dkim_error)}</p>` : ""}
       </div>
-      <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+      <div style="display:flex;gap:8px;justify-content:flex-end">
         <button id="generateDKIMBtn" class="btn btn-secondary btn-sm">Generate DKIM</button>
         <button id="verifyEmailAuthBtn" class="btn btn-primary btn-sm">Verify SPF/DKIM</button>
       </div>
-      <p id="domainEmailAuthMessage" class="form-message hidden"></p>
+      <p id="domainEmailAuthMessage" class="form-message hidden" style="margin:0"></p>
     </div>
   `;
+
   document.querySelectorAll("[data-copy-value]").forEach((button) => {
     button.onclick = async () => {
       const value = button.dataset.copyValue || "";
@@ -1079,29 +1095,7 @@ function renderDomainEmailAuthModal(domainId, domainName, payload) {
   };
 }
 
-function renderDNSInstruction(record) {
-  const name = record.name || "";
-  const value = record.value || "";
-  return `
-    <div style="display:grid;gap:8px;border:1px solid var(--color-border);border-radius:8px;padding:10px;background:var(--color-surface-hover)">
-      <div class="info-row">
-        <span class="info-row-label">Type</span>
-        <span class="info-row-value">${escapeHTML(record.type || "TXT")}</span>
-      </div>
-      <div class="info-row">
-        <span class="info-row-label">Name</span>
-        <span class="info-row-value" style="font-size:12px;word-break:break-all">${escapeHTML(name)}</span>
-      </div>
-      <div>
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px">
-          <span class="info-row-label">Value</span>
-          <button type="button" class="btn btn-secondary btn-xs" data-copy-value="${escapeHTML(value)}">Copy</button>
-        </div>
-        <pre style="white-space:pre-wrap;word-break:break-all;font-size:12px;line-height:1.45;background:var(--color-surface);border:1px solid var(--color-border);border-radius:6px;padding:8px;margin:0">${escapeHTML(value)}</pre>
-      </div>
-    </div>
-  `;
-}
+
 
 async function submitDomainForm(event) {
   event.preventDefault();
