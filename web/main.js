@@ -287,21 +287,22 @@ function badge(status) {
 
 function renderDomainCheckCell({ status, detail = "", verifyAttr = "", verifyLabel = "Verify", extraAction = "" }) {
   const safeStatus = status || "pending";
-  const safeDetail = detail ? `<div style="font-size:12px;color:var(--color-text-tertiary);margin-top:6px">${escapeHTML(detail)}</div>` : "";
+  const safeDetail = detail ? `<div class="domain-check-detail">${escapeHTML(detail)}</div>` : "";
   const verifyButton = verifyAttr
     ? `<button ${verifyAttr} class="btn btn-secondary btn-xs">${verifyLabel}</button>`
     : "";
   const actions = verifyButton || extraAction
-    ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">${verifyButton}${extraAction}</div>`
+    ? `<div class="domain-check-actions">${verifyButton}${extraAction}</div>`
     : "";
   return `
-    <div style="min-width:140px">
+    <div class="domain-check-block">
       ${badge(safeStatus)}
       ${safeDetail}
       ${actions}
     </div>
   `;
 }
+
 
 function normalizeDomainName(value) {
   return String(value || "").trim().toLowerCase();
@@ -337,13 +338,13 @@ function renderDomainEmailCheckCell(domain) {
   const dkimStatus = domain.dkim_status || "pending";
   const detail = `SPF: ${spfStatus} · DKIM: ${dkimStatus}`;
   return `
-    <div style="min-width:170px">
+    <div class="domain-check-block">
       <div style="display:flex;gap:6px;flex-wrap:wrap">
         ${badge(spfStatus)}
         ${badge(dkimStatus)}
       </div>
-      <div style="font-size:12px;color:var(--color-text-tertiary);margin-top:6px">${escapeHTML(detail)}</div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
+      <div class="domain-check-detail">${escapeHTML(detail)}</div>
+      <div class="domain-check-actions">
         <button data-domain-verify-email-auth="${domain.id}" class="btn btn-secondary btn-xs">Verify</button>
         <button data-domain-email-auth="${domain.id}" class="btn btn-secondary btn-xs">DNS</button>
       </div>
