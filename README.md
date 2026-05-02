@@ -122,6 +122,14 @@ For later code updates on the VPS, use [upgrade.sh](./upgrade.sh). It syncs the 
 sudo ./upgrade.sh
 ```
 
+If you upload a release archive to the VPS instead of updating the working tree first, deploy from that archive explicitly so the rebuild uses the same code you copied:
+
+```sh
+sudo DEPLOY_ARCHIVE=/home/admin/gomail-deploy.tgz ./upgrade.sh
+```
+
+`upgrade.sh` now fails fast when it detects a newer `gomail-deploy.tgz` beside the checkout, which helps prevent rebuilding from stale source by accident.
+
 Set `RUN_TESTS=true` if you want `go test ./...` before the restart, or `RESTART_INFRA=true` if you want a full `gomail-infra.service` restart instead of `docker compose up -d`.
 
 If the main SaaS domain certificate was issued incorrectly or DNS was fixed later, use [ssl-fix.sh](./ssl-fix.sh) to request the certificate again without rerunning the full install:
