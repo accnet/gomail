@@ -828,11 +828,13 @@ async function renderDomains() {
                 <tr>
                   <td>
                     <div class="domain-cell">
-                      <span class="domain-cell-name">${escapeHTML(domain.name)}</span>
-                      ${domain.verification_error ? `<span class="domain-cell-error">!<span class="domain-cell-error-tooltip">${escapeHTML(domain.verification_error)}</span></span>` : ""}
-
+                      <div class="domain-cell-name-row">
+                        <span class="domain-cell-name">${escapeHTML(domain.name)}</span>
+                        ${domain.verification_error ? `<span class="domain-cell-error">!<span class="domain-cell-error-tooltip">${escapeHTML(domain.verification_error)}</span></span>` : ""}
+                      </div>
                       <span class="domain-cell-meta">${domain.warning_status ? "Warning: check DNS records" : "All checks passing"}</span>
                     </div>
+
                   </td>
                   <td>
                     ${renderDomainWebsiteCell(domain, findWebsiteByDomain(domain.name))}
