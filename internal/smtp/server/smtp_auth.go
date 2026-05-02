@@ -12,6 +12,7 @@ import (
 	"gomail/internal/db"
 	"gomail/internal/smtp/relay"
 
+	"github.com/emersion/go-sasl"
 	smtp "github.com/emersion/go-smtp"
 	"gorm.io/gorm"
 )
@@ -63,7 +64,7 @@ type RelaySession struct {
 	authDone bool
 }
 
-func (s *RelaySession) AuthPlain(username, password string) error {
+func (s *RelaySession) authenticate(username, password string) error {
 	apiKeyID := username
 	hash := sha256.Sum256([]byte(password))
 	keyHash := hex.EncodeToString(hash[:])
@@ -94,6 +95,23 @@ func (s *RelaySession) AuthPlain(username, password string) error {
 	s.authDone = true
 	s.backend.Logger.Info("relay auth success", "api_key_id", apiKeyID, "user_id", user.ID, "remote", s.remote)
 	return nil
+}
+
+func (s *RelaySession) AuthMechanisms() []string {
+	return []string{sasl.Plain}
+}
+
+func (s *RelaySession) Auth(mech string) (sasl.Server, error) {
+	if !strings.EqualFold(mech, sasl.Plain) {
+		return nil, smtp.ErrAuthUnknownMechanism
+	}
+
+	return sasl.NewPlainServer(func(identity, username, password string) error {
+		if identity != "" && identity != username {
+			return errInvalidCredentials
+		}
+		return s.authenticate(username, password)
+	}), nil
 }
 
 func (s *RelaySession) Mail(from string, opts *smtp.MailOptions) error {

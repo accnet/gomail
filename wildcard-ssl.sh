@@ -34,10 +34,13 @@ command_exists() {
 
 load_env_file() {
   if [[ -f "$ENV_FILE" ]]; then
-    set -a
-    # shellcheck disable=SC1090
-    source "$ENV_FILE"
-    set +a
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      line="${line%$'\r'}"
+      [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+      if [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+        export "${BASH_REMATCH[1]}=${BASH_REMATCH[2]}"
+      fi
+    done <"$ENV_FILE"
   fi
 }
 
@@ -158,7 +161,7 @@ write_nginx_site() {
 server {
   listen 80;
   listen [::]:80;
-  server_name .$STATIC_SITES_BASE_DOMAIN;
+  server_name *.$STATIC_SITES_BASE_DOMAIN;
 
   return 301 https://\$host\$request_uri;
 }
@@ -166,7 +169,7 @@ server {
 server {
   listen 443 ssl http2;
   listen [::]:443 ssl http2;
-  server_name .$STATIC_SITES_BASE_DOMAIN;
+  server_name *.$STATIC_SITES_BASE_DOMAIN;
 
   ssl_certificate $cert_target;
   ssl_certificate_key $key_target;
