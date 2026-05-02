@@ -11,6 +11,9 @@ ENV_FILE="${ENV_FILE:-$INSTALL_ROOT/.env}"
 COMPOSE_FILE="${COMPOSE_FILE:-$INSTALL_ROOT/docker-compose.infra.yml}"
 RUN_TESTS="${RUN_TESTS:-false}"
 RESTART_INFRA="${RESTART_INFRA:-false}"
+DEPLOY_ARCHIVE="${DEPLOY_ARCHIVE:-}"
+SOURCE_DIR="$SCRIPT_DIR"
+SOURCE_TMPDIR=""
 
 log() {
   printf '[upgrade] %s\n' "$*"
@@ -20,6 +23,14 @@ fail() {
   printf '[upgrade] ERROR: %s\n' "$*" >&2
   exit 1
 }
+
+cleanup() {
+  if [[ -n "$SOURCE_TMPDIR" && -d "$SOURCE_TMPDIR" ]]; then
+    rm -rf "$SOURCE_TMPDIR"
+  fi
+}
+
+trap cleanup EXIT
 
 require_root() {
   if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
@@ -36,6 +47,35 @@ require_file() {
   [[ -e "$path" ]] || fail "required path not found: $path"
 }
 
+default_deploy_archive() {
+  local parent_dir archive_name candidate
+  parent_dir="$(dirname "$SCRIPT_DIR")"
+  archive_name="$(basename "$SCRIPT_DIR")-deploy.tgz"
+  candidate="$parent_dir/$archive_name"
+  if [[ -f "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+  fi
+}
+
+prepare_source_dir() {
+  local candidate
+
+  if [[ -n "$DEPLOY_ARCHIVE" ]]; then
+    command_exists tar || fail "tar is required when DEPLOY_ARCHIVE is set"
+    require_file "$DEPLOY_ARCHIVE"
+    SOURCE_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/gomail-upgrade-src.XXXXXX")"
+    log "extracting deploy archive $DEPLOY_ARCHIVE"
+    tar -xzf "$DEPLOY_ARCHIVE" -C "$SOURCE_TMPDIR"
+    SOURCE_DIR="$SOURCE_TMPDIR"
+    return 0
+  fi
+
+  candidate="$(default_deploy_archive || true)"
+  if [[ -n "$candidate" && "$candidate" -nt "$SCRIPT_DIR/upgrade.sh" ]]; then
+    fail "found newer deploy archive at $candidate; rerun with DEPLOY_ARCHIVE=$candidate or extract it into $SCRIPT_DIR before upgrading"
+  fi
+}
+
 ensure_prerequisites() {
   command_exists rsync || fail "rsync is required"
   command_exists go || fail "go is required"
@@ -43,7 +83,7 @@ ensure_prerequisites() {
   command_exists curl || fail "curl is required"
   require_file "$ENV_FILE"
   require_file "$COMPOSE_FILE"
-  require_file "$SCRIPT_DIR/go.mod"
+  require_file "$SOURCE_DIR/go.mod"
 }
 
 ensure_layout() {
@@ -52,7 +92,7 @@ ensure_layout() {
 }
 
 sync_source() {
-  log "syncing repository into $APP_ROOT"
+  log "syncing source from $SOURCE_DIR into $APP_ROOT"
   rsync -a --delete \
     --exclude '.git' \
     --exclude '.github' \
@@ -60,7 +100,7 @@ sync_source() {
     --exclude 'data/' \
     --exclude '.env' \
     --exclude '.env.dev' \
-    "$SCRIPT_DIR/" "$APP_ROOT/"
+    "$SOURCE_DIR/" "$APP_ROOT/"
   chown -R "$APP_USER:$APP_GROUP" "$APP_ROOT"
 }
 
@@ -158,6 +198,7 @@ EOF
 
 main() {
   require_root
+  prepare_source_dir
   ensure_prerequisites
   ensure_layout
   sync_source
