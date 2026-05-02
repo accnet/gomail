@@ -109,13 +109,35 @@ restart_services() {
   systemctl restart gomail-smtp.service
 }
 
+wait_for_health() {
+  local attempts="${1:-15}"
+  local delay_seconds="${2:-2}"
+
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    if curl -fsS http://127.0.0.1:8080/healthz >/dev/null \
+      && curl -fsS http://127.0.0.1:8090/healthz >/dev/null \
+      && systemctl --no-pager --quiet is-active gomail-api.service \
+      && systemctl --no-pager --quiet is-active gomail-static.service \
+      && systemctl --no-pager --quiet is-active gomail-smtp.service; then
+      return 0
+    fi
+
+    if (( attempt < attempts )); then
+      sleep "$delay_seconds"
+    fi
+  done
+
+  return 1
+}
+
 health_check() {
   log "checking service health"
-  curl -fsS http://127.0.0.1:8080/healthz >/dev/null
-  curl -fsS http://127.0.0.1:8090/healthz >/dev/null
-  systemctl --no-pager --quiet is-active gomail-api.service
-  systemctl --no-pager --quiet is-active gomail-static.service
-  systemctl --no-pager --quiet is-active gomail-smtp.service
+  if wait_for_health 20 2; then
+    return 0
+  fi
+
+  systemctl --no-pager status gomail-api.service gomail-static.service gomail-smtp.service || true
+  fail "services did not become healthy in time"
 }
 
 print_summary() {
