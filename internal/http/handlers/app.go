@@ -377,13 +377,16 @@ type domainListItem struct {
 	MXStatus   string `json:"mx_status"`
 	SPFStatus  string `json:"spf_status"`
 	DKIMStatus string `json:"dkim_status"`
+	SPFError   string `json:"spf_error"`
+	DKIMError  string `json:"dkim_error"`
 }
+
 
 func buildDomainListItem(row db.Domain, auth *db.DomainEmailAuth) domainListItem {
 	item := domainListItem{
-		Domain:     row,
-		MXStatus:   row.Status,
-		SPFStatus:  db.DomainAuthStatusPending,
+		Domain:    row,
+		MXStatus:  row.Status,
+		SPFStatus: db.DomainAuthStatusPending,
 		DKIMStatus: db.DomainAuthStatusPending,
 	}
 	if auth != nil {
@@ -393,9 +396,12 @@ func buildDomainListItem(row db.Domain, auth *db.DomainEmailAuth) domainListItem
 		if auth.DKIMStatus != "" {
 			item.DKIMStatus = auth.DKIMStatus
 		}
+		item.SPFError = auth.SPFError
+		item.DKIMError = auth.DKIMError
 	}
 	return item
 }
+
 
 func mustLoadOptionalDomainEmailAuth(database *gorm.DB, domainID uuid.UUID) *db.DomainEmailAuth {
 	authRow, _ := loadOptionalDomainEmailAuth(database, domainID)

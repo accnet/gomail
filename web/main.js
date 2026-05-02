@@ -285,7 +285,7 @@ function badge(status) {
 
 }
 
-function renderDomainCheckCell({ status, detail = "", verifyAttr = "", verifyLabel = "Verify", extraAction = "" }) {
+function renderDomainCheckCell({ status, detail = "", verifyAttr = "", verifyLabel = "Verify", extraAction = "", errorTooltip = "" }) {
   const safeStatus = status || "pending";
   const safeDetail = detail ? `<div class="domain-check-detail">${escapeHTML(detail)}</div>` : "";
   const verifyButton = verifyAttr
@@ -294,14 +294,23 @@ function renderDomainCheckCell({ status, detail = "", verifyAttr = "", verifyLab
   const actions = verifyButton || extraAction
     ? `<div class="domain-check-actions">${verifyButton}${extraAction}</div>`
     : "";
+  const errorIcon = errorTooltip
+    ? `<span class="domain-cell-error"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg><span class="domain-cell-error-tooltip">${escapeHTML(errorTooltip)}</span></span>`
+    : "";
   return `
     <div class="domain-check-block">
-      ${badge(safeStatus)}
-      ${safeDetail}
-      ${actions}
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px">
+        <div>
+          ${badge(safeStatus)}
+          ${safeDetail}
+          ${actions}
+        </div>
+        ${errorIcon}
+      </div>
     </div>
   `;
 }
+
 
 
 function normalizeDomainName(value) {
@@ -337,20 +346,32 @@ function renderDomainEmailCheckCell(domain) {
   const spfStatus = domain.spf_status || "pending";
   const dkimStatus = domain.dkim_status || "pending";
   const detail = `SPF: ${spfStatus} · DKIM: ${dkimStatus}`;
+  const spfError = domain.spf_error || "";
+  const dkimError = domain.dkim_error || "";
+  const errorTooltip = [spfError, dkimError].filter(Boolean).join(" · ");
+  const errorIcon = errorTooltip
+    ? `<span class="domain-cell-error"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg><span class="domain-cell-error-tooltip">${escapeHTML(errorTooltip)}</span></span>`
+    : "";
   return `
     <div class="domain-check-block">
-      <div style="display:flex;gap:6px;flex-wrap:wrap">
-        ${badge(spfStatus)}
-        ${badge(dkimStatus)}
-      </div>
-      <div class="domain-check-detail">${escapeHTML(detail)}</div>
-      <div class="domain-check-actions">
-        <button data-domain-verify-email-auth="${domain.id}" class="btn btn-secondary btn-xs">Verify</button>
-        <button data-domain-email-auth="${domain.id}" class="btn btn-secondary btn-xs">DNS</button>
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px">
+        <div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            ${badge(spfStatus)}
+            ${badge(dkimStatus)}
+          </div>
+          <div class="domain-check-detail">${escapeHTML(detail)}</div>
+          <div class="domain-check-actions">
+            <button data-domain-verify-email-auth="${domain.id}" class="btn btn-secondary btn-xs">Verify</button>
+            <button data-domain-email-auth="${domain.id}" class="btn btn-secondary btn-xs">DNS</button>
+          </div>
+        </div>
+        ${errorIcon}
       </div>
     </div>
   `;
 }
+
 
 // Derive the base domain for static site URLs from window.location.
 // e.g. "app.example.com" → "example.com", "localhost:8080" → "localhost"
@@ -844,17 +865,21 @@ async function renderDomains() {
                     ${renderDomainCheckCell({
                       status: domain.mx_status || domain.status,
                       detail: domain.mx_target || "Configured on server",
-                      verifyAttr: `data-domain-verify-mx="${domain.id}"`
+                      verifyAttr: `data-domain-verify-mx="${domain.id}"`,
+                      errorTooltip: domain.verification_error || ""
                     })}
+
                   </td>
                   <td>
                     ${renderDomainEmailCheckCell(domain)}
                   </td>
                   <td>
-                    <div class="domain-status-row">
+                    <div class="domain-status-row" style="position:relative">
                       ${badge(domain.warning_status || domain.status)}
+                      ${domain.warning_status ? `<span class="domain-cell-error" style="margin-left:4px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg><span class="domain-cell-error-tooltip">${escapeHTML(domain.warning_status)}</span></span>` : ""}
                     </div>
                   </td>
+
                   <td style="font-size:13px;color:var(--color-text-secondary);white-space:nowrap">${relative(domain.last_verified_at)}</td>
                   <td>
                     <div class="domain-actions">
