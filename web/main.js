@@ -1175,14 +1175,15 @@ async function renderEmail() {
           </button>
         </div>
         <div class="email-panel-body">
-          <div style="display:flex;gap:8px;align-items:center;padding:8px 8px 12px">
+          <div class="email-toolbar">
             <button id="toggleUnreadBtn" class="btn btn-secondary btn-xs">${state.emailUnreadOnly ? "Unread only" : "All mail"}</button>
-            <div style="margin-left:auto;display:flex;gap:6px;align-items:center">
+            <div class="email-toolbar-right">
               <button id="prevEmailPageBtn" class="btn btn-secondary btn-xs" ${state.emailPagination?.has_prev ? "" : "disabled"}>Prev</button>
-              <span style="font-size:12px;color:var(--color-text-tertiary)">Page ${state.emailPagination?.page || 1}/${state.emailPagination?.total_pages || 1}</span>
+              <span class="email-toolbar-page">Page ${state.emailPagination?.page || 1}/${state.emailPagination?.total_pages || 1}</span>
               <button id="nextEmailPageBtn" class="btn btn-secondary btn-xs" ${state.emailPagination?.has_next ? "" : "disabled"}>Next</button>
             </div>
           </div>
+
           ${filteredEmails.length ? filteredEmails.map((mail) => `
             <button class="email-item ${state.selectedEmailID === mail.id ? "active" : ""}" data-email-id="${mail.id}">
               <div class="email-item-row">
