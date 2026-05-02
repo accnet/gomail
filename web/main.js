@@ -829,7 +829,8 @@ async function renderDomains() {
                   <td>
                     <div class="domain-cell">
                       <span class="domain-cell-name">${escapeHTML(domain.name)}</span>
-                      ${domain.verification_error ? `<span class="domain-cell-error">${escapeHTML(domain.verification_error)}</span>` : ""}
+                      ${domain.verification_error ? `<span class="domain-cell-error">!<span class="domain-cell-error-tooltip">${escapeHTML(domain.verification_error)}</span></span>` : ""}
+
                       <span class="domain-cell-meta">${domain.warning_status ? "Warning: check DNS records" : "All checks passing"}</span>
                     </div>
                   </td>
