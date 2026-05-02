@@ -1756,9 +1756,67 @@ tbody tr:hover {
 /* Domain action buttons */
 .domain-actions {
   display: flex;
-  gap: 4px;
   align-items: center;
+  justify-content: flex-end;
 }
+
+.action-dots {
+  position: relative;
+}
+
+.action-dots-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-tertiary);
+  transition: background 0.15s, color 0.15s;
+}
+
+.action-dots-trigger:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.action-dots-menu {
+  position: absolute;
+  z-index: 100;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 120px;
+  padding: 4px;
+  background: var(--color-card-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 16px var(--color-shadow-lg);
+}
+
+.action-dots-item {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text);
+  text-align: left;
+  border-radius: var(--radius-sm);
+  transition: background 0.15s;
+}
+
+.action-dots-item:hover {
+  background: var(--color-surface-hover);
+}
+
+.action-dots-danger {
+  color: var(--color-danger);
+}
+
+.action-dots-danger:hover {
+  background: var(--color-danger-light);
+}
+
 
 /* Check status compact block (for Website A, SMTP MX, SPF/DKIM columns) */
 .domain-check-block {
