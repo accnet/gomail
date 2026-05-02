@@ -1786,7 +1786,7 @@ tbody tr:hover {
   z-index: 100;
   top: calc(100% + 4px);
   right: 0;
-  min-width: 120px;
+  min-width: 160px;
   padding: 4px;
   background: var(--color-card-bg);
   border: 1px solid var(--color-border);

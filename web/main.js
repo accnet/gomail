@@ -861,11 +861,11 @@ async function renderDomains() {
                         </button>
 
                         <div class="action-dots-menu hidden">
-                          <button data-domain-verify-email-auth="${domain.id}" class="action-dots-item">Verify SPF/DKIM</button>
-                          <button data-domain-email-auth="${domain.id}" class="action-dots-item">DNS records</button>
+                          <button data-domain-email-auth="${domain.id}" class="action-dots-item">Verify SPF/DKIM</button>
                           <div style="height:1px;background:var(--color-border);margin:4px 0"></div>
                           <button data-domain-delete="${domain.id}" class="action-dots-item action-dots-danger">Delete</button>
                         </div>
+
 
                       </div>
                     </div>
