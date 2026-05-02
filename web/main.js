@@ -1146,7 +1146,12 @@ async function renderEmail() {
           ${inboxes.length ? inboxes.map((inbox) => `
             <div class="inbox-item ${state.selectedInboxID === inbox.id ? "active" : ""}" data-mailbox-id="${inbox.id}">
               <span class="inbox-address">${escapeHTML(inbox.address)}</span>
-              <span class="inbox-status">${inbox.is_active ? "Active" : "Off"}</span>
+              <div style="display:flex;align-items:center;gap:4px;flex-shrink:0">
+                <span class="inbox-status">${inbox.is_active ? "Active" : "Off"}</span>
+                <button data-inbox-delete="${inbox.id}" class="icon-btn" title="Delete mailbox" style="width:24px;height:24px;color:var(--color-danger)">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+                </button>
+              </div>
             </div>
           `).join("") : `
             <div class="empty-state" style="padding:24px">
@@ -1293,12 +1298,32 @@ async function renderEmail() {
     };
   });
 
+  document.querySelectorAll("[data-inbox-delete]").forEach((button) => {
+    button.onclick = async (event) => {
+      event.stopPropagation();
+      const inboxId = button.dataset.inboxDelete;
+      const inbox = state.inboxes.find((i) => i.id === inboxId);
+      if (!confirm(`Delete mailbox "${inbox?.address || inboxId}"? All associated emails and attachments will be permanently removed.`)) return;
+      try {
+        await api(`/inboxes/${inboxId}`, { method: "DELETE" });
+        if (state.selectedInboxID === inboxId) {
+          state.selectedInboxID = null;
+          state.selectedEmailID = null;
+        }
+        await renderEmail();
+      } catch (error) {
+        alert(error.message);
+      }
+    };
+  });
+
   document.querySelectorAll("[data-email-id]").forEach((button) => {
     button.onclick = async () => {
       state.selectedEmailID = button.dataset.emailId;
       await renderEmail();
     };
   });
+
 
   if (state.selectedEmailID) {
     await renderEmailDetail(state.selectedEmailID);
