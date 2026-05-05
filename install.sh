@@ -492,7 +492,7 @@ map \$http_upgrade \$connection_upgrade {
 server {
   listen 80;
   listen [::]:80;
-  server_name $APP_DOMAIN;
+  server_name $APP_DOMAIN $SAAS_DOMAIN;
 
   client_max_body_size 50m;
 

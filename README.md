@@ -1,71 +1,179 @@
 # GoMail
 
-GoMail is a self-hosted inbound email SaaS platform with static website hosting.
+<div align="center">
+
+**Self-hosted email SaaS — inbound mailboxes, SMTP relay, API keys, realtime updates & static website hosting.**
+
+[![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go)](https://go.dev/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql)](https://www.postgresql.org/)
+[![Redis](https://img.shields.io/badge/Redis-7-DC382D?logo=redis)](https://redis.io/)
+[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker)](https://www.docker.com/)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+</div>
+
+---
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Features](#features)
+- [Quick Start (Local)](#quick-start-local)
+- [VPS Deployment](#vps-deployment)
+- [API Reference](#api-reference)
+- [SMTP Relay / Submission](#smtp-relay--submission)
+- [Static Website Hosting](#static-website-hosting)
+- [Environment Variables](#environment-variables)
+- [Development](#development)
+- [Scripts Reference](#scripts-reference)
+
+---
+
+## Overview
+
+GoMail is a batteries-included, self-hosted email platform. Run your own inbound email service with custom domains, catch-all mailboxes, real-time push notifications, an SMTP submission relay with API-key auth, DKIM signing, and static site hosting — all from a single Go binary.
+
+**Three runtimes, one codebase:**
+
+| Binary | Role | Default Port |
+|---|---|---|
+| `api` | REST API, SSE realtime events, admin panel | `8080` |
+| `smtp` | Inbound SMTP server + SMTP AUTH relay | `25` / `2525` (dev) |
+| `static-server` | Serves published static sites, resolves custom domains | `8090` |
+
+## Architecture
+
+```mermaid
+graph LR
+    Internet -->|port 25| SMTP[cmd/smtp<br/>Inbound + Relay]
+    Internet -->|port 443| Traefik[Traefik v3<br/>Reverse Proxy]
+    Internet -->|port 80/443| Static[cmd/static-server<br/>Static Sites]
+
+    Traefik --> API[cmd/api<br/>Gin REST API]
+    Traefik --> Static
+
+    SMTP --> PG[(PostgreSQL)]
+    API --> PG
+    API --> Redis[(Redis<br/>Pub/Sub)]
+    SMTP --> Redis
+
+    API -->|SSE Stream| Browser[Browser SPA]
+    SMTP -->|MIME Parse| FS[Local Storage<br/>raw-eml / attachments]
+    API -->|ZIP Upload| FS2[Local Storage<br/>static-sites]
+    Static --> FS2
+```
 
 ## Features
 
-### 📧 Inbound Email Hosting
-- SMTP inbound (port 25/2525) with MIME parsing
-- Attachment storage with virus scanning (extension + content-type)
-- HTML sanitization (bluemonday) + remote image scrubbing
-- Real-time SSE push via Redis pub/sub
-- Refresh token rotation with session chain revocation
-- Rate-limited auth endpoints (token bucket)
+### 📧 Inbound Email
 
-### 📤 SMTP Relay / Email Submission
-- API key management with scoped permissions (send_email, full_access)
-- One-time key reveal on creation (SHA-256 hashed at rest)
-- SMTP AUTH relay support (port 587 STARTTLS, port 465 TLS)
-- Key lifecycle: create, list, get, patch, revoke, delete
-- Real-time usage counter per API key
-- Configurable SMTP auth hostname and ports
+- SMTP server accepting mail on port 25 (prod) / 2525 (dev)
+- Full MIME parsing with multipart, attachments, and inline content
+- HTML sanitization via [bluemonday](https://github.com/microcosm-cc/bluemonday) with remote image scrubbing
+- Attachment storage with extension and content-type validation
+- Email threading (In-Reply-To / References)
+- Reply tracking — know if a sent message was a reply to an inbound email
+
+### 🔐 Authentication & Security
+
+- JWT access tokens + refresh token rotation with session chain revocation
+- Password hashing with bcrypt
+- Rate-limited auth endpoints (token bucket)
+- API key management with scoped permissions (`send_email`, `full_access`)
+- One-time key reveal — SHA-256 hashed at rest, never stored in plaintext
+- Session-protected routes + API-key-protected routes
+
+### 📤 SMTP Relay / Submission
+
+- SMTP AUTH on port 587 (STARTTLS) and port 465 (implicit TLS)
+- API keys as SMTP credentials (username: `api`, password: the key)
+- Outbound delivery: direct MX lookup or upstream relay
+- DKIM signing for outbound messages (per-domain RSA keypairs)
+- Real-time usage counters per API key
+- Configurable daily send limits
 
 ### 🌐 Static Website Hosting
+
 - Upload ZIP archives → auto-publish to subdomain
-- Atomic publish (staging → live rename, rollback on failure)
-- Custom domain binding with DNS verification
-- Automatic Let's Encrypt SSL via Traefik
-- ZIP bomb protection (max size, max extracted size, max file count)
-- Forbidden file extension blocking (.php, .sh, .exe...)
-- Path traversal protection (zip-slip prevention)
+- Atomic publish with staging → live rename (rollback on failure)
+- Custom domain binding with DNS TXT/AAAA verification
+- Automatic Let's Encrypt SSL via Traefik or native nginx+Certbot
+- ZIP bomb protection (max archive size, max extracted size, max file count)
+- Forbidden extension blocking (`.php`, `.sh`, `.exe`, etc.)
+- Path traversal prevention (Zip Slip)
 - Thumbnail generation for published sites
 
-## Quick Start
+### 🛡️ Admin Panel
 
-1. Prepare environment files:
+- Super admin user management (list, activate/deactivate, set quotas, delete)
+- Attachment flag override
+- Per-user quotas: domains, inboxes, message size, attachment size, storage, websites
 
-```sh
-cp .env.example .env        # production / deploy defaults
-cp .env.dev.example .env.dev # optional local host overrides for ./start.sh
+### ⚡ Realtime
+
+- SSE (Server-Sent Events) stream via Redis pub/sub
+- New email notifications pushed to browser in real time
+- Query-token auth for `EventSource` (no custom headers needed)
+
+---
+
+## Quick Start (Local)
+
+### Prerequisites
+
+- Go 1.26+
+- Docker & Docker Compose
+- Node.js (for JS syntax checks only)
+
+### 1. Clone & configure
+
+```bash
+git clone <repo-url> gomail
+cd gomail
+
+cp .env.example .env          # production defaults
+cp .env.dev.example .env.dev  # local overrides
 ```
 
-2. Start Postgres and Redis:
+### 2. Start infrastructure
 
-```sh
-docker compose up -d
+```bash
+make dev-up
 ```
 
-3. Build and start the local SaaS stack:
+Starts PostgreSQL 16 and Redis 7 in Docker.
 
-```sh
+### 3. Build & run
+
+```bash
 ./start.sh
 ```
 
-Local dev API runs on `http://localhost:8080` by default.
+This builds the `api` and `smtp` binaries, then starts:
+- **API** on `http://localhost:8080`
+- **SMTP** on port `2525`
 
-`start.sh` reads `.env.dev`, builds `api` and `smtp`, ensures Postgres/Redis are reachable on localhost, then starts API on `8080` and SMTP on `2525` with logs in `.run/`.
+Logs are written to `.run/`.
 
-`docker compose up` reuses `.env.dev`, and `docker-compose.yaml` applies the container-only overrides such as `postgres`, `redis`, and `/app/data` paths.
+### 4. Verify
 
-Production deploys should use `.env`.
+```bash
+curl http://localhost:8080/healthz
+# {"ok":true}
+```
 
-## VPS Production Install
+Open `http://localhost:8080/app/` in your browser. The default super admin account is seeded from `DEFAULT_ADMIN_EMAIL` / `DEFAULT_ADMIN_PASSWORD` in `.env.dev`.
 
-The repository now includes [install.sh](./install.sh) for first-time VPS setup on Ubuntu/Debian. It installs Docker, Go, nginx, ufw, builds the GoMail binaries, provisions `systemd` services, and writes an nginx reverse proxy for the main SaaS domain.
+---
 
-Run it as root from the repository checkout:
+## VPS Deployment
 
-```sh
+### Automated Install (Ubuntu/Debian)
+
+[`install.sh`](./install.sh) provisions everything: Docker, Go, nginx, ufw, systemd services, TLS certificates.
+
+```bash
 sudo APP_DOMAIN=mail.example.com \
   SAAS_DOMAIN=example.com \
   SMTP_HOSTNAME=mx.example.com \
@@ -74,180 +182,348 @@ sudo APP_DOMAIN=mail.example.com \
   ./install.sh
 ```
 
-The script prompts for any missing secrets and now attempts a Let's Encrypt certificate for the primary app domain by default. Use `ENABLE_TLS=false` to skip TLS during first install, or `ENABLE_TLS=true` to require certificate provisioning success.
+| Variable | Description |
+|---|---|
+| `APP_DOMAIN` | Primary web/API domain (e.g. `mail.example.com`) |
+| `SAAS_DOMAIN` | Root SaaS domain (e.g. `example.com`) |
+| `SMTP_HOSTNAME` | Public MX hostname (e.g. `mx.example.com`) |
+| `SMTP_AUTH_HOSTNAME` | SMTP submission hostname (e.g. `smtp.example.com`) |
+| `STATIC_SITES_BASE_DOMAIN` | (Optional) Wildcard base for hosted sites |
+| `DEFAULT_ADMIN_EMAIL` | Super admin email for initial seed |
+| `ENABLE_TLS` | Enable Let's Encrypt during install (default: `true`) |
 
-If you want hosted static sites to live under a different wildcard base domain than the main SaaS domain, set `STATIC_SITES_BASE_DOMAIN` separately when running the installer. Example: app on `example.com`, hosted sites on `*.sites.example.net`.
+### DNS Setup
 
-```sh
-sudo APP_DOMAIN=example.com \
-  SAAS_DOMAIN=example.com \
-  STATIC_SITES_BASE_DOMAIN=sites.example.net \
-  SMTP_HOSTNAME=mx.example.com \
-  SMTP_AUTH_HOSTNAME=smtp.example.com \
-  DEFAULT_ADMIN_EMAIL=admin@example.com \
-  ./install.sh
-```
+| Record | Type | Target |
+|---|---|---|
+| `mail.example.com` | A | VPS IP |
+| `mx.example.com` | A | VPS IP |
+| `smtp.example.com` | A | VPS IP |
+| `example.com` | A | VPS IP (optional — see routing below) |
+| `example.com` | MX | `mx.example.com` (priority 10) |
+| `*.sites.example.net` | A | VPS IP (for static sites) |
 
-This nginx-based install covers the main app domain and routes all other HTTP hosts to `static-server`, which is enough for HTTP custom domains and hosted subdomains.
+### Domain Routing (Nginx)
 
-For wildcard HTTPS on hosted static sites, use [wildcard-ssl.sh](./wildcard-ssl.sh). It supports two modes:
+Nginx routes requests based on the `Host` header:
 
-1. Install an existing wildcard certificate you already issued elsewhere.
-2. Automatically request a wildcard certificate through Cloudflare DNS-01 and then apply it to nginx.
+| Host header matches | Proxied to | Serves |
+|---|---|---|
+| `$APP_DOMAIN` (e.g. `mail.example.com`) | API (`:8080`) | Web app (login, dashboard, API) |
+| `$SAAS_DOMAIN` (e.g. `example.com`) | API (`:8080`) | Web app — same as above |
+| Any other host (`_` default) | static-server (`:8090`) | Static sites, custom domains, `*.sites.example.net` |
 
-Existing certificate mode:
+> **Note:** Both `APP_DOMAIN` and `SAAS_DOMAIN` route to the app. This means visiting `example.com` and `mail.example.com` both take you to the login page. The `SAAS_DOMAIN` is also the base for user email domains (e.g. `@example.com` mailboxes).
 
-```sh
-sudo STATIC_SITES_BASE_DOMAIN=sites.example.net \
-  WILDCARD_SSL_MODE=existing \
-  WILDCARD_CERT_FILE=/root/certs/sites.example.net.fullchain.pem \
-  WILDCARD_KEY_FILE=/root/certs/sites.example.net.key \
-  ./wildcard-ssl.sh
-```
+### Upgrade
 
-Cloudflare auto-issue mode:
-
-```sh
-sudo STATIC_SITES_BASE_DOMAIN=sites.example.net \
-  WILDCARD_SSL_MODE=cloudflare \
-  CF_API_TOKEN=your_cloudflare_dns_token \
-  ./wildcard-ssl.sh
-```
-
-This script enables nginx HTTPS for `*.STATIC_SITES_BASE_DOMAIN` and redirects wildcard HTTP traffic to HTTPS. The `cloudflare` mode installs `python3-certbot-dns-cloudflare` if needed, requests a certificate for both `STATIC_SITES_BASE_DOMAIN` and `*.STATIC_SITES_BASE_DOMAIN`, then wires it into nginx.
-
-For exact custom domains assigned through the app, the native nginx/systemd install now also installs a root-owned helper plus a restricted sudoers rule so the `Active SSL` action can provision per-domain nginx + Certbot certificates automatically.
-
-For later code updates on the VPS, use [upgrade.sh](./upgrade.sh). It syncs the new checkout into the deployed app directory, rebuilds binaries, refreshes Docker infra, restarts the `systemd` services, and verifies local health checks.
-
-```sh
+```bash
 sudo ./upgrade.sh
 ```
 
-If you upload a release archive to the VPS instead of updating the working tree first, deploy from that archive explicitly so the rebuild uses the same code you copied:
+Supports archive-based deploys:
 
-```sh
+```bash
 sudo DEPLOY_ARCHIVE=/home/admin/gomail-deploy.tgz ./upgrade.sh
 ```
 
-`upgrade.sh` now fails fast when it detects a newer `gomail-deploy.tgz` beside the checkout, which helps prevent rebuilding from stale source by accident.
+Options: `RUN_TESTS=true` (run `go test` before restart), `RESTART_INFRA=true` (full infra restart).
 
-Set `RUN_TESTS=true` if you want `go test ./...` before the restart, or `RESTART_INFRA=true` if you want a full `gomail-infra.service` restart instead of `docker compose up -d`.
+### SSL Management
 
-If the main SaaS domain certificate was issued incorrectly or DNS was fixed later, use [ssl-fix.sh](./ssl-fix.sh) to request the certificate again without rerunning the full install:
+| Script | Purpose |
+|---|---|
+| [`ssl-fix.sh`](./ssl-fix.sh) | Re-request main app TLS certificate |
+| [`wildcard-ssl.sh`](./wildcard-ssl.sh) | Manage wildcard SSL for `*.sites.example.net` |
+| [`custom-domain-ssl.sh`](./scripts/custom-domain-ssl.sh) | Per-domain SSL for exact custom domains |
 
-```sh
-sudo ./ssl-fix.sh
-```
+---
 
-It reads `APP_DOMAIN` and `DEFAULT_ADMIN_EMAIL` from `/opt/gomail/.env` by default. Set `DELETE_OLD_CERT=true` if you want to remove the old certificate lineage before requesting a fresh one.
+## API Reference
 
-If you need to reapply or rotate the wildcard certificate used by hosted sites, rerun [wildcard-ssl.sh](./wildcard-ssl.sh) with either updated certificate/key file paths or the same Cloudflare token.
+### Authentication
 
-## Developer Commands
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/auth/register` | None | Register new account |
+| `POST` | `/api/auth/login` | None | Login, returns access + refresh tokens |
+| `POST` | `/api/auth/refresh` | None | Rotate refresh token |
+| `GET` | `/api/me` | Bearer | Get current user profile |
+| `POST` | `/api/auth/logout` | Bearer | Invalidate refresh token chain |
+| `POST` | `/api/auth/change-password` | Bearer | Change password |
 
-```sh
-make dev-up    # start Postgres and Redis
-make api       # run the HTTP API
-make smtp      # run the SMTP server
-make check     # go test, go vet, and JS syntax checks
-make e2e       # local manual E2E flow via API + SMTP
-make dev-down  # stop local services
-```
+### Domains
 
-In development, demo data is seeded by default for the super admin account. Set `SEED_DEMO_DATA=false` to disable it.
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/api/domains` | Bearer | List user domains |
+| `POST` | `/api/domains` | Bearer | Add custom domain |
+| `GET` | `/api/domains/:id` | Bearer | Get domain details |
+| `POST` | `/api/domains/:id/verify` | Bearer | Verify domain ownership (TXT) |
+| `POST` | `/api/domains/:id/verify-a` | Bearer | Verify A record |
+| `POST` | `/api/domains/:id/verify-mx` | Bearer | Verify MX record |
+| `GET` | `/api/domains/:id/email-auth` | Bearer | Get SPF/DKIM instructions |
+| `POST` | `/api/domains/:id/email-auth/dkim/generate` | Bearer | Generate DKIM keypair |
+| `POST` | `/api/domains/:id/email-auth/verify` | Bearer | Verify SPF + DKIM DNS records |
+| `DELETE` | `/api/domains/:id` | Bearer | Delete domain |
 
-`make e2e` assumes the local Docker Postgres container is `gomail-postgres-1` and uses a local-only shortcut to mark the created domain as verified in the database before sending a test mail to SMTP.
+### Inboxes & Email
 
-For VPS deploy, set `SMTP_PORT=25`, open port 25 in the firewall/provider security group, and point `MX_TARGET` to the public SMTP hostname, for example `mx.example.com`.
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/api/inboxes` | Bearer | List inboxes |
+| `POST` | `/api/inboxes` | Bearer | Create inbox (catch-all or specific) |
+| `PATCH` | `/api/inboxes/:id` | Bearer | Update inbox |
+| `DELETE` | `/api/inboxes/:id` | Bearer | Delete inbox |
+| `GET` | `/api/conversations` | Bearer | List email conversations (threaded) |
+| `GET` | `/api/emails` | Bearer | List emails for an inbox |
+| `GET` | `/api/emails/:id` | Bearer | Get full email with sanitized HTML |
+| `GET` | `/api/emails/:id/thread` | Bearer | Get full thread for an email |
+| `GET` | `/api/emails/:id/reply-status` | Bearer | Check if email was replied to |
+| `POST` | `/api/emails/:id/reply` | Bearer | Reply to an email |
+| `PATCH` | `/api/emails/:id/read` | Bearer | Mark as read |
+| `DELETE` | `/api/emails/:id` | Bearer | Delete email |
+| `GET` | `/api/emails/:id/attachments/:aid/download` | Bearer | Download attachment |
+| `GET` | `/api/dashboard` | Bearer | Dashboard stats |
+| `GET` | `/api/outbound/status` | Bearer | Outbound delivery status |
 
-## SaaS Domain
+### Realtime
 
-Recommended DNS:
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/api/events/stream` | Query token | SSE stream of realtime events |
 
-- `mail.example.com` -> web/API reverse proxy.
-- `mx.example.com` -> VPS running SMTP port 25.
-- User domains: `MX 10 mx.example.com`.
+### Admin (requires Bearer + admin role)
 
-## SMTP Relay Configuration
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/api/admin/users` | Super Admin | List all users |
+| `PATCH` | `/api/admin/users/:id/status` | Super Admin | Activate/deactivate user |
+| `PATCH` | `/api/admin/users/:id/quotas` | Super Admin | Update user quotas |
+| `DELETE` | `/api/admin/users/:id` | Super Admin | Delete user |
+| `PATCH` | `/api/admin/attachments/:id/override` | Admin | Override attachment flag |
 
-Users generate API keys with `send_email` scope to submit emails through the platform's SMTP relay. Each key is hashed with SHA-256 and only revealed once on creation.
+---
 
-### Environment Variables
+## SMTP Relay / Submission
 
-| Variable | Default | Description |
-|---|---|---|
-| `SMTP_AUTH_HOSTNAME` | `smtp.your-domain.com` | SMTP relay hostname advertised to API key holders |
-| `SMTP_AUTH_PORT` | `587` | SMTP AUTH submission port (STARTTLS) |
-| `SMTP_AUTH_TLS_PORT` | `465` | SMTP AUTH submission port (implicit TLS) |
+Users generate API keys and use them to submit outbound email through GoMail's SMTP relay.
 
-### API Endpoints
+### API Key Management
 
-All endpoints require Bearer token authentication.
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/api-keys` | Bearer | Create key (full key shown once) |
+| `GET` | `/api/api-keys` | Bearer | List keys (prefix only) |
+| `GET` | `/api/api-keys/:id` | Bearer | Get key details |
+| `PATCH` | `/api/api-keys/:id` | Bearer | Update name/scope |
+| `DELETE` | `/api/api-keys/:id` | Bearer | Delete key |
+| `POST` | `/api/api-keys/:id/revoke` | Bearer | Revoke key |
+| `GET` | `/api/api-keys/:id/usage` | Bearer | Get usage stats |
 
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/api/api-keys` | Create API key (returns full key once) |
-| `GET` | `/api/api-keys` | List all API keys (key prefix only) |
-| `GET` | `/api/api-keys/:id` | Get single API key |
-| `PATCH` | `/api/api-keys/:id` | Update key name/scope |
-| `DELETE` | `/api/api-keys/:id` | Delete API key |
-| `POST` | `/api/api-keys/:id/revoke` | Revoke API key (sets is_active=false) |
-| `GET` | `/api/api-keys/:id/usage` | Get usage count |
-| `POST` | `/api/send-email` | Send email (requires `X-Api-Key` header with `send_email` scope) |
+### Send Email (API)
 
-### Send Email Request
-
-```json
+```http
 POST /api/send-email
 X-Api-Key: go_xxxxxxxxxxxx
+Content-Type: application/json
 
 {
   "to": "recipient@example.com",
-  "subject": "Hello",
-  "body": "Email content"
+  "subject": "Hello from GoMail",
+  "body": "<p>Email content with <b>HTML</b> support</p>"
 }
 ```
 
 ### SMTP AUTH Credentials
 
-When creating a key with `send_email` scope, the response includes SMTP credentials:
+Use any SMTP client with these settings:
 
-```json
-{
-  "smtp_settings": {
-    "host": "smtp.your-domain.com",
-    "port_587": "587",
-    "port_465": "465",
-    "username_format": "api"
-  }
-}
-```
-
-Users authenticate to the SMTP relay using their full API key as the password and `api` as the username.
-
-## Default Super Admin
-
-The first API startup seeds `DEFAULT_ADMIN_EMAIL` with `DEFAULT_ADMIN_PASSWORD`. In production the app refuses sample secrets from `.env.example`.
-
-## Architecture
-
-```
-cmd/api              → HTTP API + SSE (port 8080/8080)
-cmd/smtp             → SMTP inbound (port 25/2525)
-cmd/static-server    → Static file serving (port 8090)
-```
-
-### Stack
-
-| Component | Technology |
+| Setting | Value |
 |---|---|
-| Backend | Go + Gin + GORM |
-| Database | PostgreSQL 16 |
-| Cache/Realtime | Redis 7 |
-| SMTP | emersion/go-smtp |
-| Reverse Proxy | Traefik v3.3 |
-| Frontend | Vanilla JS SPA |
+| Host | `smtp.your-domain.com` |
+| Port | `587` (STARTTLS) or `465` (TLS) |
+| Username | `api` |
+| Password | Your full API key (`go_...`) |
+
+---
+
+## Static Website Hosting
+
+### Lifecycle
+
+1. **Upload** a ZIP archive via API
+2. GoMail validates the archive (size, file count, forbidden extensions, zip-slip)
+3. Content is extracted to a staging directory
+4. On success, the staging directory is atomically renamed to live
+5. The site is served at `https://<project-id>.<base-domain>`
+
+### Custom Domains
+
+- Bind a custom domain to your static project
+- Verify ownership via DNS TXT record
+- Optionally verify via AAAA record
+- Activate SSL via Let's Encrypt (automatic or manual)
+
+### Safety Guards
+
+| Protection | Default Limit |
+|---|---|
+| Max archive size | Configurable (`STATIC_SITES_MAX_ARCHIVE_BYTES`) |
+| Max extracted size | Configurable (`STATIC_SITES_MAX_EXTRACTED_BYTES`) |
+| Max file count | Configurable (`STATIC_SITES_MAX_FILE_COUNT`) |
+| Blocked extensions | `.php`, `.sh`, `.exe`, `.bat`, `.py`, etc. |
+| Path traversal | Prevented (Zip Slip detection) |
+
+---
+
+## Environment Variables
+
+<details>
+<summary><b>Core</b></summary>
+
+| Variable | Default | Description |
+|---|---|---|
+| `APP_ENV` | `development` | `production` or `development` |
+| `APP_NAME` | `GoMail` | Application display name |
+| `APP_BASE_URL` | `http://localhost:8080` | Public base URL |
+| `HTTP_HOST` | `0.0.0.0` | API listen address |
+| `HTTP_PORT` | `8080` | API listen port |
+| `DATABASE_URL` | — | PostgreSQL connection string |
+| `REDIS_ADDR` | `localhost:6379` | Redis address |
+
+</details>
+
+<details>
+<summary><b>Auth & Security</b></summary>
+
+| Variable | Default | Description |
+|---|---|---|
+| `JWT_SECRET` | — | JWT signing secret (min 32 chars in prod) |
+| `ACCESS_TOKEN_TTL` | `15m` | Access token lifetime |
+| `REFRESH_TOKEN_TTL` | `720h` | Refresh token lifetime |
+| `DEFAULT_ADMIN_EMAIL` | — | Super admin email for seed |
+| `DEFAULT_ADMIN_PASSWORD` | — | Super admin password for seed |
+
+</details>
+
+<details>
+<summary><b>SMTP</b></summary>
+
+| Variable | Default | Description |
+|---|---|---|
+| `SMTP_HOST` | `0.0.0.0` | Inbound SMTP listen address |
+| `SMTP_PORT` | `2525` | Inbound SMTP port (25 in prod) |
+| `SMTP_HOSTNAME` | `localhost` | Public MX hostname |
+| `SMTP_AUTH_ENABLED` | `false` | Enable SMTP AUTH relay |
+| `SMTP_AUTH_HOSTNAME` | — | Relay hostname for clients |
+| `SMTP_AUTH_PORT` | `587` | Submission port (STARTTLS) |
+| `SMTP_AUTH_TLS_PORT` | `465` | Submission port (implicit TLS) |
+| `OUTBOUND_MODE` | `direct` | `direct` or `relay` |
+| `OUTBOUND_RELAY_HOST` | — | Upstream relay host |
+| `OUTBOUND_RELAY_PORT` | `587` | Upstream relay port |
+| `DKIM_ENABLED` | `false` | Enable DKIM signing |
+| `DKIM_SELECTOR` | `gomail` | DKIM selector |
+| `DKIM_KEY_ENCRYPTION_SECRET` | — | Secret to encrypt DKIM private keys |
+
+</details>
+
+<details>
+<summary><b>Static Sites</b></summary>
+
+| Variable | Default | Description |
+|---|---|---|
+| `STATIC_SITES_ROOT` | `./data/static-sites` | Storage root for sites |
+| `STATIC_SITES_BASE_DOMAIN` | — | Wildcard base domain |
+| `STATIC_SERVER_ADDR` | `:8090` | Static server listen address |
+| `STATIC_SITES_MAX_ARCHIVE_BYTES` | `104857600` | Max ZIP upload (100 MB) |
+| `STATIC_SITES_MAX_EXTRACTED_BYTES` | `524288000` | Max extracted size (500 MB) |
+| `STATIC_SITES_MAX_FILE_COUNT` | `10000` | Max files per site |
+
+</details>
+
+---
+
+## Development
+
+### Commands
+
+```bash
+make dev-up      # Start PostgreSQL + Redis
+make dev-down    # Stop infrastructure
+make api         # Run API server
+make smtp        # Run SMTP server
+make test        # Run all tests
+make vet         # Run go vet
+make check       # test + vet + JS syntax check
+make e2e         # Manual end-to-end test
+```
+
+### Project Structure
+
+```
+cmd/
+├── api/main.go           # HTTP API entry point
+├── smtp/main.go          # SMTP server entry point
+└── static-server/main.go # Static file server entry point
+
+internal/
+├── auth/                 # Password hashing, JWT, refresh tokens
+├── config/               # Environment loading & validation
+├── db/                   # GORM models, migrations, seeding
+│   └── migrations/       # SQL migration files
+├── dkimkeys/             # DKIM key generation & management
+├── dns/                  # DNS record verification
+├── http/
+│   ├── handlers/         # Route handlers (auth, domains, emails, API keys, static projects)
+│   └── middleware/       # Auth, API key auth, rate limiting
+├── mail/
+│   ├── outbound/         # Outbound message building & delivery
+│   ├── parser/           # MIME parsing
+│   └── service/          # Inbound message processing pipeline
+├── realtime/             # Redis pub/sub & SSE
+├── smtp/
+│   ├── relay/            # Outbound SMTP relay + DKIM signing
+│   ├── server/           # Inbound SMTP server + SMTP AUTH
+│   └── session/          # SMTP session management
+├── staticprojects/       # Static site lifecycle, DNS binding, thumbnails
+└── storage/              # Filesystem storage abstraction
+
+pkg/
+├── logger/               # Structured logging
+└── response/             # HTTP response helpers
+
+web/                      # Vanilla JS SPA frontend
+```
+
+### Database
+
+PostgreSQL is the source of truth. Migrations are in `internal/db/migrations/`. The API auto-migrates on startup via GORM.
+
+### Demo Data
+
+In development mode, a demo super admin is seeded automatically. Disable with `SEED_DEMO_DATA=false`.
+
+---
+
+## Scripts Reference
+
+| Script | Purpose |
+|---|---|
+| [`install.sh`](./install.sh) | First-time VPS provisioning (Docker, Go, nginx, systemd, TLS) |
+| [`upgrade.sh`](./upgrade.sh) | In-place upgrade from git or archive |
+| [`start.sh`](./start.sh) | Local dev build & run |
+| [`ssl-fix.sh`](./ssl-fix.sh) | Re-request main app TLS certificate |
+| [`wildcard-ssl.sh`](./wildcard-ssl.sh) | Manage wildcard SSL for static sites |
+| [`scripts/custom-domain-ssl.sh`](./scripts/custom-domain-ssl.sh) | Per-domain SSL provisioning |
+| [`scripts/dev-smtp-sink.py`](./scripts/dev-smtp-sink.py) | Development SMTP sink for testing |
+| [`scripts/manual_e2e.sh`](./scripts/manual_e2e.sh) | Manual end-to-end test script |
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE) for details.
 
 ## Project Status
 

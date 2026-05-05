@@ -16,13 +16,14 @@ import (
 	"gomail/internal/http/handlers"
 	"gomail/internal/mail/outbound"
 	"gomail/internal/realtime"
-	relay "gomail/internal/smtp/relay"
+	"gomail/internal/smtp/relay"
 	"gomail/internal/staticprojects"
 	"gomail/internal/storage"
 	"gomail/pkg/logger"
 
-	"github.com/google/uuid"
 	"log/slog"
+
+	"github.com/google/uuid"
 )
 
 func main() {
@@ -79,13 +80,15 @@ func main() {
 	go thumbnailWorker.Run(ctx, time.Minute)
 
 	staticHandler := handlers.NewStaticProjectsHandler(staticSvc)
+	siteMiddleware := handlers.NewStaticSiteMiddleware(database, cfg.SaaSDomain)
 	app := handlers.App{
-		DB:             database,
-		Auth:           authSvc,
-		Config:         cfg,
-		Redis:          redisClient,
-		Verifier:       verifier,
-		StaticProjects: staticHandler,
+		DB:                   database,
+		Auth:                 authSvc,
+		Config:               cfg,
+		Redis:                redisClient,
+		Verifier:             verifier,
+		StaticProjects:       staticHandler,
+		StaticSiteMiddleware: siteMiddleware,
 	}
 	if cfg.OutboundSMTPConfigured() {
 		relaySender := relay.NewSender(database, cfg, logg, make(map[string]int))

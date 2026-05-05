@@ -31,20 +31,29 @@ import (
 )
 
 type App struct {
-	DB             *gorm.DB
-	Auth           *auth.Service
-	Config         config.Config
-	Redis          *redis.Client
-	Verifier       dns.Verifier
-	StaticProjects *StaticProjectsHandler
-	SendEmail      func(to, from, subject, body string) error
-	SendOutbound   func(userID uuid.UUID, msg outbound.Message, log db.SentEmailLog) error
-	RateLimiter    *mw.RateLimiter
+	DB                   *gorm.DB
+	Auth                 *auth.Service
+	Config               config.Config
+	Redis                *redis.Client
+	Verifier             dns.Verifier
+	StaticProjects       *StaticProjectsHandler
+	StaticSiteMiddleware *StaticSiteMiddleware
+	SendEmail            func(to, from, subject, body string) error
+	SendOutbound         func(userID uuid.UUID, msg outbound.Message, log db.SentEmailLog) error
+	RateLimiter          *mw.RateLimiter
 }
 
 func (a App) Router() *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Recovery(), requestID())
+
+	// Static site middleware: check if the SaaS domain has a static project bound.
+	// Must run before the web app static handler so it can intercept and serve the
+	// static site instead of the login page.
+	if a.StaticSiteMiddleware != nil {
+		r.Use(a.StaticSiteMiddleware.Handler())
+	}
+
 	r.GET("/healthz", func(c *gin.Context) { response.OK(c, gin.H{"ok": true}) })
 	r.GET("/", func(c *gin.Context) { c.Redirect(http.StatusFound, "/app/") })
 	r.Static("/app", "./web")
@@ -315,7 +324,6 @@ func (a App) verifyDomain(c *gin.Context) {
 		_ = realtime.NewPublisher(a.Redis).Publish(c.Request.Context(), realtime.Event{Type: "domain.verified", UserID: user.ID, Data: gin.H{"domain_id": row.ID, "name": row.Name}})
 	}
 	response.OK(c, buildDomainListItem(row, mustLoadOptionalDomainEmailAuth(a.DB, row.ID)))
-	return
 }
 
 func (a App) verifyDomainA(c *gin.Context) {
