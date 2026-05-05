@@ -74,6 +74,35 @@ const viewMeta = {
 
 const defaultView = "dashboard";
 
+// --- Global Progress Bar ---
+let _progressCount = 0;
+let _progressTimer = null;
+
+function startProgress() {
+  _progressCount++;
+  const bar = document.getElementById("global-progress");
+  if (!bar) return;
+  clearTimeout(_progressTimer);
+  _progressTimer = null;
+  bar.classList.add("active", "running");
+  bar.classList.remove("done");
+}
+
+function finishProgress(delay = 200) {
+  _progressCount = Math.max(0, _progressCount - 1);
+  if (_progressCount > 0) return;
+  _progressCount = 0;
+  const bar = document.getElementById("global-progress");
+  if (!bar) return;
+  bar.classList.add("done");
+  bar.classList.remove("running");
+  clearTimeout(_progressTimer);
+  _progressTimer = setTimeout(() => {
+    bar.classList.remove("active", "done");
+    bar.style.width = "0%";
+  }, delay);
+}
+
 // --- API Helper ---
 const api = async (path, options = {}) => {
   const { refresh, team = true, ...fetchOptions } = options;
@@ -88,10 +117,12 @@ const api = async (path, options = {}) => {
   if (fetchOptions.body instanceof FormData) {
     delete headers["Content-Type"];
   }
-  const res = await fetch(`/api${path}`, {
-    ...fetchOptions,
-    headers
-  });
+  startProgress();
+  try {
+    const res = await fetch(`/api${path}`, {
+      ...fetchOptions,
+      headers
+    });
   if (res.status === 401 && refresh !== false && refreshToken) {
     const refreshed = await refreshSession();
     if (refreshed) {
@@ -116,7 +147,13 @@ const api = async (path, options = {}) => {
     }
     throw new Error(body.message || "Request failed");
   }
-  return res.json();
+    const data = await res.json();
+    finishProgress();
+    return data;
+  } catch (err) {
+    finishProgress();
+    throw err;
+  }
 };
 
 async function refreshSession() {
@@ -240,6 +277,8 @@ async function renderView(view, options = {}) {
     const changed = setViewURL(nextView, options.replaceURL);
     if (changed && !options.replaceURL) return;
   }
+  startProgress();
+  try {
   if (base === "dashboard") await renderDashboard();
   else if (base === "domains") await renderDomains();
   else if (base === "email") await renderEmail();
@@ -253,6 +292,9 @@ async function renderView(view, options = {}) {
   else if (base === "workspace" || base === "teams") await renderWorkspace();
   else if (base === "members") await renderMembers();
   else if (base === "settings") await renderSettings();
+  } finally {
+    finishProgress(400);
+  }
 }
 
 
@@ -421,9 +463,21 @@ function getBaseDomain() {
   return hostname;
 }
 
+// Return the root domain from window.location (e.g. "app.homthu.xyz" → "homthu.xyz")
+function rawRootDomain() {
+  const hostname = window.location.hostname;
+  if (hostname === "localhost" || hostname === "127.0.0.1") return hostname;
+  const parts = hostname.split(".");
+  if (parts.length <= 2) return hostname;
+  // Strip leading subdomains; keep only the last 2 labels (the registered domain)
+  return parts.slice(-2).join(".");
+}
+
 function websiteThumbnailURL(site) {
   if (!site?.id || site.thumbnail_status !== "ready") return "";
-  return `/static-thumbnails/${encodeURIComponent(site.id)}/thumbnail.png`;
+  // Serve thumbnails from assets subdomain (cookie-free, CDN-ready)
+  const assetsHost = window.GOMAIL?.assetsHost || ("assets." + rawRootDomain());
+  return `https://${assetsHost}/static-thumbnails/${encodeURIComponent(site.id)}/thumbnail.png`;
 }
 
 function roleLabel(user) {

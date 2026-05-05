@@ -3,6 +3,7 @@ package staticprojects
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"image/png"
 	"log/slog"
 	"os"
@@ -255,7 +256,7 @@ func TestDeployRejectsOversizedArchive(t *testing.T) {
 	for i := range content {
 		content[i] = byte(i%256) + byte(i/256)
 	}
-	_, err = svc.DeployStream(nil, userID, "Too Big", bytes.NewReader(zipBytes(map[string]string{
+	_, err = svc.DeployStream(context.TODO(), userID, "Too Big", bytes.NewReader(zipBytes(map[string]string{
 		"index.html": string(content),
 	})), "site.zip")
 	if err == nil || !strings.Contains(err.Error(), "archive exceeds") {
@@ -613,20 +614,21 @@ func TestThumbnailWorkerProcessesActivePublishedProjects(t *testing.T) {
 	activeID := uuid.New()
 	disabledID := uuid.New()
 	root := t.TempDir()
-	activeRoot := filepath.Join(root, "active")
-	disabledRoot := filepath.Join(root, "disabled")
-	if err := os.MkdirAll(activeRoot, 0755); err != nil {
+	// Thumbnails go to {StorageRoot}/live/{projectID}/thumbnail.png
+	activeLiveDir := filepath.Join(root, "live", activeID.String())
+	disabledLiveDir := filepath.Join(root, "live", disabledID.String())
+	if err := os.MkdirAll(activeLiveDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(disabledRoot, 0755); err != nil {
+	if err := os.MkdirAll(disabledLiveDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.Create(&db.User{ID: userID, Email: "thumb@example.com", MaxWebsites: 2}).Error; err != nil {
 		t.Fatal(err)
 	}
 	rows := []db.StaticProject{
-		{ID: activeID, UserID: userID, Name: "Active", Subdomain: "active", RootFolder: activeRoot, Status: "published", ThumbnailStatus: "pending", IsActive: true},
-		{ID: disabledID, UserID: userID, Name: "Disabled", Subdomain: "disabled", RootFolder: disabledRoot, Status: "published", ThumbnailStatus: "pending", IsActive: false},
+		{ID: activeID, UserID: userID, Name: "Active", Subdomain: "active", RootFolder: activeLiveDir, Status: "published", ThumbnailStatus: "pending", IsActive: true},
+		{ID: disabledID, UserID: userID, Name: "Disabled", Subdomain: "disabled", RootFolder: disabledLiveDir, Status: "published", ThumbnailStatus: "pending", IsActive: false},
 	}
 	for i := range rows {
 		if err := database.Create(&rows[i]).Error; err != nil {
@@ -647,10 +649,12 @@ func TestThumbnailWorkerProcessesActivePublishedProjects(t *testing.T) {
 	if active.ThumbnailStatus != "ready" {
 		t.Fatalf("active thumbnail status = %q, want ready", active.ThumbnailStatus)
 	}
-	if _, err := os.Stat(filepath.Join(activeRoot, "thumbnail.png")); err != nil {
+	// Thumbnail is at {StorageRoot}/live/{projectID}/thumbnail.png
+	activeThumbPath := filepath.Join(activeLiveDir, "thumbnail.png")
+	if _, err := os.Stat(activeThumbPath); err != nil {
 		t.Fatalf("expected active thumbnail file: %v", err)
 	}
-	thumbFile, err := os.Open(filepath.Join(activeRoot, "thumbnail.png"))
+	thumbFile, err := os.Open(activeThumbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -684,11 +688,12 @@ func TestThumbnailWorkerRefreshesLegacyReadyPlaceholder(t *testing.T) {
 	userID := uuid.New()
 	projectID := uuid.New()
 	root := t.TempDir()
-	projectRoot := filepath.Join(root, "legacy")
-	if err := os.MkdirAll(projectRoot, 0755); err != nil {
+	// Thumbnail goes to {StorageRoot}/live/{projectID}/thumbnail.png
+	projectLiveDir := filepath.Join(root, "live", projectID.String())
+	if err := os.MkdirAll(projectLiveDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	thumbnailPath := filepath.Join(projectRoot, "thumbnail.png")
+	thumbnailPath := filepath.Join(projectLiveDir, "thumbnail.png")
 	legacyPNG := []byte{
 		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
 		0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
@@ -703,7 +708,7 @@ func TestThumbnailWorkerRefreshesLegacyReadyPlaceholder(t *testing.T) {
 	if err := database.Create(&db.User{ID: userID, Email: "legacy@example.com", MaxWebsites: 1}).Error; err != nil {
 		t.Fatal(err)
 	}
-	project := db.StaticProject{ID: projectID, UserID: userID, Name: "Legacy", Subdomain: "legacy", RootFolder: projectRoot, Status: "published", ThumbnailStatus: "ready", ThumbnailPath: thumbnailPath, IsActive: true}
+	project := db.StaticProject{ID: projectID, UserID: userID, Name: "Legacy", Subdomain: "legacy", RootFolder: projectLiveDir, Status: "published", ThumbnailStatus: "ready", ThumbnailPath: thumbnailPath, IsActive: true}
 	if err := database.Create(&project).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -711,6 +716,7 @@ func TestThumbnailWorkerRefreshesLegacyReadyPlaceholder(t *testing.T) {
 	worker := NewThumbnailWorker(database, root, func(string) string { return "" })
 	worker.processPending()
 
+	// The worker should have regenerated the thumbnail in-place (at liveThumbnailPath)
 	thumbFile, err := os.Open(thumbnailPath)
 	if err != nil {
 		t.Fatal(err)

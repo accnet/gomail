@@ -115,6 +115,41 @@ input, select, textarea {
   font-size: inherit;
 }
 
+/* ===== Global Progress Bar ===== */
+.global-progress {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 9999;
+  height: 3px;
+  width: 0%;
+  background: linear-gradient(90deg, var(--color-primary), #818cf8, var(--color-primary));
+  background-size: 200% 100%;
+  border-radius: 0 2px 2px 0;
+  opacity: 0;
+  transition: opacity 0.15s;
+  pointer-events: none;
+}
+.global-progress.active {
+  opacity: 1;
+}
+.global-progress.running {
+  width: 30%;
+  animation: progress-slide 1.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+.global-progress.done {
+  width: 100%;
+  transition: width 0.35s cubic-bezier(0.4, 0, 1, 1);
+  animation: none;
+}
+@keyframes progress-slide {
+  0%   { width: 0%; background-position: 0% 50%; }
+  40%  { width: 45%; background-position: 100% 50%; }
+  70%  { width: 70%; background-position: 0% 50%; }
+  90%  { width: 85%; background-position: 100% 50%; }
+  100% { width: 92%; background-position: 0% 50%; }
+}
+
 /* --- Utility --- */
 .hidden { display: none !important; }
 

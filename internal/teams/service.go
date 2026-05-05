@@ -498,7 +498,7 @@ func (s *Service) InviteMember(ctx context.Context, actorID, teamID uuid.UUID, e
 		return nil, errors.New("invites can only be created for member role")
 	}
 
-	if scopes == nil || len(scopes) == 0 {
+	if len(scopes) == 0 {
 		scopes = DefaultScopes(role)
 	}
 	if err := ValidateScopes(scopes); err != nil {

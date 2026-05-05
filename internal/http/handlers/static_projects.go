@@ -78,15 +78,10 @@ func (h *StaticProjectsHandler) Thumbnail(c *gin.Context) {
 		return
 	}
 
-	thumbnailPath := project.ThumbnailPath
-	if thumbnailPath == "" {
-		thumbnailPath = filepath.Join(project.RootFolder, "thumbnail.png")
-	}
-	if thumbnailPath == "" {
-		c.Status(http.StatusNotFound)
-		return
-	}
+	// Thumbnail is always at StaticSitesRoot/live/{projectID}/thumbnail.png
+	thumbnailPath := filepath.Join(h.Service.Config.StaticSitesRoot, "live", projectID.String(), "thumbnail.png")
 
+	// Safety: resolve and verify the path stays within StaticSitesRoot
 	rootAbs, err := filepath.Abs(h.Service.Config.StaticSitesRoot)
 	if err != nil {
 		c.Status(http.StatusInternalServerError)
@@ -103,6 +98,14 @@ func (h *StaticProjectsHandler) Thumbnail(c *gin.Context) {
 		return
 	}
 	if _, err := os.Stat(thumbAbs); err != nil {
+		// Fallback: try the stored thumbnail_path for backwards compatibility
+		if project.ThumbnailPath != "" {
+			if _, err2 := os.Stat(project.ThumbnailPath); err2 == nil {
+				c.Header("Cache-Control", "public, max-age=300")
+				c.File(project.ThumbnailPath)
+				return
+			}
+		}
 		c.Status(http.StatusNotFound)
 		return
 	}

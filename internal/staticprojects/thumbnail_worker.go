@@ -59,39 +59,38 @@ func (w *ThumbnailWorker) processPending() {
 	var projects []struct {
 		ID              uuid.UUID
 		Subdomain       string
-		RootFolder      string
 		ThumbnailPath   string
 		ThumbnailStatus string
 	}
 
 	w.DB.Model(&db.StaticProject{}).
-		Select("id, subdomain, root_folder, thumbnail_path, thumbnail_status").
+		Select("id, subdomain, thumbnail_path, thumbnail_status").
 		Where("status = ? AND is_active = ? AND deleted_at IS NULL", "published", true).
 		Find(&projects)
 
 	for _, p := range projects {
-		if !w.needsGeneration(p.ThumbnailStatus, p.RootFolder, p.ThumbnailPath) {
+		if !w.needsGeneration(p.ID, p.ThumbnailStatus, p.ThumbnailPath) {
 			continue
 		}
-		w.generateThumbnail(p.ID, p.Subdomain, p.RootFolder)
+		w.generateThumbnail(p.ID, p.Subdomain, "")
 	}
 }
 
-func (w *ThumbnailWorker) needsGeneration(status, rootFolder, thumbnailPath string) bool {
+func (w *ThumbnailWorker) needsGeneration(projectID uuid.UUID, status, thumbnailPath string) bool {
 	switch status {
 	case "pending", "failed", "", "processing":
 		return true
 	case "ready":
-		return w.isLegacyPlaceholder(rootFolder, thumbnailPath)
+		return w.isLegacyPlaceholder(projectID, thumbnailPath)
 	default:
 		return true
 	}
 }
 
-func (w *ThumbnailWorker) isLegacyPlaceholder(rootFolder, thumbnailPath string) bool {
+func (w *ThumbnailWorker) isLegacyPlaceholder(projectID uuid.UUID, thumbnailPath string) bool {
 	path := strings.TrimSpace(thumbnailPath)
 	if path == "" {
-		path = filepath.Join(rootFolder, "thumbnail.png")
+		path = w.liveThumbnailPath(projectID)
 	}
 	info, err := os.Stat(path)
 	if err != nil {
@@ -116,11 +115,16 @@ func (w *ThumbnailWorker) isLegacyPlaceholder(rootFolder, thumbnailPath string) 
 	return strings.ToLower(format) == "png" && config.Width == 1 && config.Height == 1
 }
 
+// liveThumbnailPath returns the absolute path to the thumbnail for a project.
+func (w *ThumbnailWorker) liveThumbnailPath(projectID uuid.UUID) string {
+	return filepath.Join(w.StorageRoot, "live", projectID.String(), "thumbnail.png")
+}
+
 // generateThumbnail generates a thumbnail for the given project.
 func (w *ThumbnailWorker) generateThumbnail(projectID uuid.UUID, subdomain, rootFolder string) {
 	w.DB.Model(&db.StaticProject{}).Where("id = ?", projectID).Update("thumbnail_status", "processing")
 
-	thumbnailPath := filepath.Join(rootFolder, "thumbnail.png")
+	thumbnailPath := w.liveThumbnailPath(projectID)
 
 	// Try to use chromium/screenshot tools if available
 	// Fallback: generate a simple placeholder
