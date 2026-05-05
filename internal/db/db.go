@@ -417,14 +417,6 @@ func SeedDemoData(ctx context.Context, database *gorm.DB, cfg config.Config) err
 		inboxes[i].ID = existingInbox.ID
 	}
 
-	var existing int64
-	if err := database.WithContext(ctx).Model(&Email{}).Where("message_id LIKE ?", "<demo-%").Count(&existing).Error; err != nil {
-		return err
-	}
-	if existing > 0 {
-		return nil
-	}
-
 	emails := []Email{
 		demoEmail(inboxes[0].ID, "<demo-welcome@gomail.local>", "team@gomail.local", "hello@site1.localhost", "Welcome to GoMail", "Your verified domain is ready to receive inbound email.", "Your verified domain is ready. You can create more addresses from the Email tab.", now.Add(-35*time.Minute), false),
 		demoEmail(inboxes[1].ID, "<demo-support@gomail.local>", "customer@example.net", "support@site2.localhost", "Question about inbound routing", "Can you confirm this mailbox receives support tickets?", "Can you confirm this mailbox receives support tickets from external senders?", now.Add(-5*time.Hour), false),
@@ -432,7 +424,7 @@ func SeedDemoData(ctx context.Context, database *gorm.DB, cfg config.Config) err
 	}
 	return database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		for i := range emails {
-			if err := tx.Create(&emails[i]).Error; err != nil {
+			if err := upsertDemoEmail(tx, emails[i]); err != nil {
 				return err
 			}
 		}
@@ -443,15 +435,17 @@ func SeedDemoData(ctx context.Context, database *gorm.DB, cfg config.Config) err
 
 func demoEmail(inboxID uuid.UUID, messageID, from, to, subject, snippetText, body string, receivedAt time.Time, read bool) Email {
 	html := "<p>" + body + "</p>"
+	normalizedMessageID := normalizeThreadMessageID(messageID)
 	return Email{
 
-		InboxID:     inboxID,
-		MessageID:   messageID,
-		FromAddress: from,
-		ToAddress:   to,
-		Subject:     subject,
-		ReceivedAt:  receivedAt,
-		Snippet:     snippetText,
+		InboxID:        inboxID,
+		MessageID:      normalizedMessageID,
+		ConversationID: normalizedMessageID,
+		FromAddress:    from,
+		ToAddress:      to,
+		Subject:        subject,
+		ReceivedAt:     receivedAt,
+		Snippet:        snippetText,
 
 		TextBody:          body,
 		HTMLBody:          html,
@@ -460,4 +454,72 @@ func demoEmail(inboxID uuid.UUID, messageID, from, to, subject, snippetText, bod
 		AuthResultsJSON:   datatypes.JSON([]byte(`{"spf":["pass"],"dkim":["pass"],"dmarc":["pass"]}`)),
 		IsRead:            read,
 	}
+}
+
+func upsertDemoEmail(tx *gorm.DB, email Email) error {
+	rawMessageID := "<" + email.MessageID + ">"
+	var existing []Email
+	if err := tx.Where("message_id IN ? OR conversation_id = ?", []string{email.MessageID, rawMessageID}, email.ConversationID).
+		Where("from_address = ? AND to_address = ? AND subject = ?", email.FromAddress, email.ToAddress, email.Subject).
+		Order("received_at ASC").
+		Find(&existing).Error; err != nil {
+		return err
+	}
+	if len(existing) == 0 {
+		return tx.Create(&email).Error
+	}
+
+	canonical := existing[0]
+	updates := map[string]any{
+		"inbox_id":               email.InboxID,
+		"message_id":             email.MessageID,
+		"conversation_id":        email.ConversationID,
+		"from_address":           email.FromAddress,
+		"to_address":             email.ToAddress,
+		"subject":                email.Subject,
+		"received_at":            email.ReceivedAt,
+		"snippet":                email.Snippet,
+		"text_body":              email.TextBody,
+		"html_body":              email.HTMLBody,
+		"html_body_sanitized":    email.HTMLBodySanitized,
+		"headers_json":           email.HeadersJSON,
+		"auth_results_json":      email.AuthResultsJSON,
+		"is_read":                email.IsRead,
+		"in_reply_to_message_id": "",
+		"references_message_ids": datatypes.JSON([]byte(`[]`)),
+		"parent_email_id":        nil,
+		"root_email_id":          nil,
+	}
+	if err := tx.Model(&Email{}).Where("id = ?", canonical.ID).Updates(updates).Error; err != nil {
+		return err
+	}
+	if len(existing) == 1 {
+		return nil
+	}
+
+	extraIDs := make([]uuid.UUID, 0, len(existing)-1)
+	for _, row := range existing[1:] {
+		extraIDs = append(extraIDs, row.ID)
+	}
+	if err := tx.Model(&SentEmailLog{}).
+		Where("original_email_id IN ?", extraIDs).
+		Update("original_email_id", canonical.ID).Error; err != nil {
+		return err
+	}
+	if err := tx.Model(&SentEmailLog{}).
+		Where("parent_email_id IN ?", extraIDs).
+		Update("parent_email_id", canonical.ID).Error; err != nil {
+		return err
+	}
+	if err := tx.Model(&Email{}).
+		Where("parent_email_id IN ?", extraIDs).
+		Update("parent_email_id", canonical.ID).Error; err != nil {
+		return err
+	}
+	if err := tx.Model(&Email{}).
+		Where("root_email_id IN ?", extraIDs).
+		Update("root_email_id", canonical.ID).Error; err != nil {
+		return err
+	}
+	return tx.Where("id IN ?", extraIDs).Delete(&Email{}).Error
 }

@@ -227,11 +227,6 @@ func (a App) login(c *gin.Context) {
 
 func (a App) me(c *gin.Context) {
 	user := mw.CurrentUser(c)
-	if a.Teams != nil {
-		if next, err := a.Teams.ReconcileInviteeAccess(c.Request.Context(), user); err == nil {
-			user = next
-		}
-	}
 	response.OK(c, user)
 }
 
@@ -639,9 +634,22 @@ type conversationListItem struct {
 	IsRead         bool      `json:"is_read"`
 }
 
+type conversationSummaryRow struct {
+	ConversationID string    `gorm:"column:conversation_id"`
+	PrimaryEmailID uuid.UUID `gorm:"column:primary_email_id"`
+	InboxID        uuid.UUID `gorm:"column:inbox_id"`
+	Subject        string    `gorm:"column:subject"`
+	FromAddress    string    `gorm:"column:from_address"`
+	ToAddress      string    `gorm:"column:to_address"`
+	Snippet        string    `gorm:"column:snippet"`
+	LatestAtRaw    string    `gorm:"column:latest_at"`
+	Count          int       `gorm:"column:count"`
+	UnreadCount    int       `gorm:"column:unread_count"`
+}
+
 func (a App) listConversations(c *gin.Context) {
 	ctx := teams.FromGin(c)
-	q := a.DB.Joins("JOIN inboxes ON inboxes.id = emails.inbox_id")
+	q := a.DB.Model(&db.Email{}).Joins("JOIN inboxes ON inboxes.id = emails.inbox_id")
 	q = ScopeInboxes(q, ctx)
 	if inbox := c.Query("inbox_id"); inbox != "" {
 		q = q.Where("emails.inbox_id = ?", inbox)
@@ -676,99 +684,142 @@ func (a App) listConversations(c *gin.Context) {
 		}
 	}
 
-	var emails []db.Email
-	if err := q.Omit("TextBody", "HTMLBody", "HTMLBodySanitized", "HeadersJSON").
-		Order("emails.received_at desc").
-		Find(&emails).Error; err != nil {
+	filteredEmails := q.Select(strings.Join([]string{
+		"emails.id",
+		"emails.inbox_id",
+		"emails.subject",
+		"emails.from_address",
+		"emails.to_address",
+		"emails.snippet",
+		"emails.received_at",
+		"emails.is_read",
+		conversationKeySQL("emails") + " AS conversation_id",
+	}, ", "))
+
+	inboundSummary := a.DB.Table("(?) AS filtered_emails", filteredEmails).
+		Select(strings.Join([]string{
+			"conversation_id",
+			"COUNT(*) AS inbound_count",
+			"SUM(CASE WHEN is_read THEN 0 ELSE 1 END) AS unread_count",
+			"MAX(received_at) AS latest_inbound_at",
+		}, ", ")).
+		Group("conversation_id")
+
+	rankedInbound := a.DB.Table("(?) AS filtered_emails", filteredEmails).
+		Select(strings.Join([]string{
+			"conversation_id",
+			"id AS primary_email_id",
+			"inbox_id",
+			"subject",
+			"from_address",
+			"to_address",
+			"snippet",
+			"received_at",
+			"ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY received_at DESC, id DESC) AS rn",
+		}, ", "))
+
+	latestInbound := a.DB.Table("(?) AS ranked_inbound", rankedInbound).
+		Select(strings.Join([]string{
+			"conversation_id",
+			"primary_email_id",
+			"inbox_id",
+			"subject",
+			"from_address",
+			"to_address",
+			"snippet",
+			"received_at AS latest_inbound_at",
+		}, ", ")).
+		Where("rn = 1")
+
+	sentBase := a.DB.Table("sent_email_logs")
+	sentBase = ScopeSentEmailLogs(sentBase, ctx)
+	sentBase = sentBase.Where("sent_email_logs.conversation_id IN (?)", a.DB.Table("(?) AS inbound_summary", inboundSummary).Select("conversation_id"))
+
+	rankedSent := a.DB.Table("(?) AS sent_email_logs", sentBase.Select(strings.Join([]string{
+		"sent_email_logs.conversation_id",
+		"sent_email_logs.subject",
+		"sent_email_logs.from_address",
+		"sent_email_logs.to_address",
+		"COALESCE(NULLIF(sent_email_logs.body_text, ''), sent_email_logs.body_html) AS snippet",
+		"COALESCE(sent_email_logs.sent_at, sent_email_logs.created_at) AS latest_sent_at",
+		"sent_email_logs.id",
+	}, ", "))).
+		Select(strings.Join([]string{
+			"conversation_id",
+			"subject",
+			"from_address",
+			"to_address",
+			"snippet",
+			"latest_sent_at",
+			"ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY latest_sent_at DESC, id DESC) AS rn",
+		}, ", "))
+
+	sentSummary := a.DB.Table("(?) AS ranked_sent", rankedSent).
+		Select(strings.Join([]string{
+			"conversation_id",
+			"COUNT(*) AS sent_count",
+			"MAX(latest_sent_at) AS latest_sent_at",
+			"MAX(CASE WHEN rn = 1 THEN subject ELSE '' END) AS sent_subject",
+			"MAX(CASE WHEN rn = 1 THEN from_address ELSE '' END) AS sent_from_address",
+			"MAX(CASE WHEN rn = 1 THEN to_address ELSE '' END) AS sent_to_address",
+			"MAX(CASE WHEN rn = 1 THEN snippet ELSE '' END) AS sent_snippet",
+		}, ", ")).
+		Group("conversation_id")
+
+	conversations := a.DB.Table("(?) AS inbound_summary", inboundSummary).
+		Joins("JOIN (?) AS latest_inbound ON latest_inbound.conversation_id = inbound_summary.conversation_id", latestInbound).
+		Joins("LEFT JOIN (?) AS sent_summary ON sent_summary.conversation_id = inbound_summary.conversation_id", sentSummary)
+
+	var total int64
+	if err := conversations.Count(&total).Error; err != nil {
 		response.Error(c, http.StatusInternalServerError, "conversation_list_failed", "could not load conversations")
 		return
 	}
 
-	byConversation := map[string]*conversationListItem{}
-	order := make([]string, 0)
-	for _, row := range emails {
-		key := conversationKey(row)
-		item := byConversation[key]
-		if item == nil {
-			item = &conversationListItem{
-				ConversationID: key,
-				PrimaryEmailID: row.ID,
-				InboxID:        row.InboxID,
-				Subject:        row.Subject,
-				FromAddress:    row.FromAddress,
-				ToAddress:      row.ToAddress,
-				Snippet:        row.Snippet,
-				LatestAt:       row.ReceivedAt,
-			}
-			byConversation[key] = item
-			order = append(order, key)
-		}
-		item.Count++
-		if !row.IsRead {
-			item.UnreadCount++
-		}
-		if row.ReceivedAt.After(item.LatestAt) {
-			item.PrimaryEmailID = row.ID
-			item.InboxID = row.InboxID
-			item.Subject = row.Subject
-			item.FromAddress = row.FromAddress
-			item.ToAddress = row.ToAddress
-			item.Snippet = row.Snippet
-			item.LatestAt = row.ReceivedAt
-		}
+	var rows []conversationSummaryRow
+	if err := conversations.Select(strings.Join([]string{
+		"inbound_summary.conversation_id",
+		"latest_inbound.primary_email_id",
+		"latest_inbound.inbox_id",
+		"CASE WHEN sent_summary.latest_sent_at IS NOT NULL AND sent_summary.latest_sent_at > inbound_summary.latest_inbound_at THEN sent_summary.sent_subject ELSE latest_inbound.subject END AS subject",
+		"CASE WHEN sent_summary.latest_sent_at IS NOT NULL AND sent_summary.latest_sent_at > inbound_summary.latest_inbound_at THEN sent_summary.sent_from_address ELSE latest_inbound.from_address END AS from_address",
+		"CASE WHEN sent_summary.latest_sent_at IS NOT NULL AND sent_summary.latest_sent_at > inbound_summary.latest_inbound_at THEN sent_summary.sent_to_address ELSE latest_inbound.to_address END AS to_address",
+		"CASE WHEN sent_summary.latest_sent_at IS NOT NULL AND sent_summary.latest_sent_at > inbound_summary.latest_inbound_at THEN sent_summary.sent_snippet ELSE latest_inbound.snippet END AS snippet",
+		"CASE WHEN sent_summary.latest_sent_at IS NOT NULL AND sent_summary.latest_sent_at > inbound_summary.latest_inbound_at THEN sent_summary.latest_sent_at ELSE inbound_summary.latest_inbound_at END AS latest_at",
+		"(inbound_summary.inbound_count + COALESCE(sent_summary.sent_count, 0)) AS count",
+		"inbound_summary.unread_count",
+	}, ", ")).
+		Order("latest_at DESC").
+		Limit(pageSize).
+		Offset((page - 1) * pageSize).
+		Scan(&rows).Error; err != nil {
+		response.Error(c, http.StatusInternalServerError, "conversation_list_failed", "could not load conversations")
+		return
 	}
 
-	if len(order) > 0 {
-		var sent []db.SentEmailLog
-		sq := a.DB.Model(&db.SentEmailLog{})
-		sq = ScopeSentEmailLogs(sq, ctx)
-		if err := sq.Where("conversation_id IN ?", order).Find(&sent).Error; err != nil {
-			response.Error(c, http.StatusInternalServerError, "conversation_list_failed", "could not load sent conversations")
-			return
-		}
-		for _, row := range sent {
-			item := byConversation[row.ConversationID]
-			if item == nil {
-				continue
-			}
-			item.Count++
-			at := row.CreatedAt
-			if row.SentAt != nil {
-				at = *row.SentAt
-			}
-			if at.After(item.LatestAt) {
-				item.Subject = row.Subject
-				item.FromAddress = row.FromAddress
-				item.ToAddress = row.ToAddress
-				item.Snippet = firstNonEmpty(row.BodyText, row.BodyHTML)
-				item.LatestAt = at
-			}
-		}
-	}
-
-	items := make([]conversationListItem, 0, len(byConversation))
-	for _, item := range byConversation {
-		item.IsRead = item.UnreadCount == 0
-		items = append(items, *item)
-	}
-	sort.SliceStable(items, func(i, j int) bool {
-		return items[i].LatestAt.After(items[j].LatestAt)
-	})
-	total := len(items)
-	start := (page - 1) * pageSize
-	if start > total {
-		start = total
-	}
-	end := start + pageSize
-	if end > total {
-		end = total
+	items := make([]conversationListItem, 0, len(rows))
+	for _, row := range rows {
+		latestAt := parseConversationListTime(row.LatestAtRaw)
+		items = append(items, conversationListItem{
+			ConversationID: row.ConversationID,
+			PrimaryEmailID: row.PrimaryEmailID,
+			InboxID:        row.InboxID,
+			Subject:        row.Subject,
+			FromAddress:    row.FromAddress,
+			ToAddress:      row.ToAddress,
+			Snippet:        row.Snippet,
+			LatestAt:       latestAt,
+			Count:          row.Count,
+			UnreadCount:    row.UnreadCount,
+			IsRead:         row.UnreadCount == 0,
+		})
 	}
 	totalPages := 0
 	if total > 0 {
-		totalPages = (total + pageSize - 1) / pageSize
+		totalPages = int((total + int64(pageSize) - 1) / int64(pageSize))
 	}
 	response.OK(c, gin.H{
-		"items": items[start:end],
+		"items": items,
 		"pagination": gin.H{
 			"page":        page,
 			"page_size":   pageSize,
@@ -778,6 +829,33 @@ func (a App) listConversations(c *gin.Context) {
 			"has_next":    page < totalPages,
 		},
 	})
+}
+
+func conversationKeySQL(alias string) string {
+	return fmt.Sprintf(
+		"REPLACE(REPLACE(TRIM(COALESCE(NULLIF(%[1]s.conversation_id, ''), NULLIF(%[1]s.message_id, ''), CAST(%[1]s.id AS TEXT))), '<', ''), '>', '')",
+		alias,
+	)
+}
+
+func parseConversationListTime(value string) time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}
+	}
+	layouts := []string{
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05.999999999Z07:00",
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02 15:04:05",
+	}
+	for _, layout := range layouts {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed
+		}
+	}
+	return time.Time{}
 }
 
 func conversationKey(row db.Email) string {
@@ -1196,15 +1274,29 @@ func (a App) markRead(c *gin.Context) {
 
 func (a App) deleteEmail(c *gin.Context) {
 	ctx := teams.FromGin(c)
-	q := a.DB.Table("emails").
-		Joins("JOIN inboxes ON inboxes.id = emails.inbox_id").
-		Where("emails.id = ?", c.Param("id"))
+
+	// Build inbox authorization subquery
+	inboxQ := a.DB.Table("inboxes").Select("id")
 	if ctx.Personal {
-		q = q.Where("inboxes.user_id = ? AND inboxes.team_id IS NULL", ctx.UserID)
+		inboxQ = inboxQ.Where("user_id = ? AND team_id IS NULL", ctx.UserID)
 	} else {
-		q = q.Where("inboxes.team_id = ?", ctx.TeamID)
+		inboxQ = inboxQ.Where("team_id = ?", ctx.TeamID)
 	}
-	q.Update("deleted_at", time.Now())
+
+	result := a.DB.Table("emails").
+		Where("id = ?", c.Param("id")).
+		Where("inbox_id IN (?)", inboxQ).
+		Where("deleted_at IS NULL").
+		Update("deleted_at", time.Now())
+
+	if result.Error != nil {
+		response.Error(c, http.StatusInternalServerError, "delete_failed", result.Error.Error())
+		return
+	}
+	if result.RowsAffected == 0 {
+		response.Error(c, http.StatusNotFound, "not_found", "email not found")
+		return
+	}
 	response.OK(c, gin.H{"ok": true})
 }
 

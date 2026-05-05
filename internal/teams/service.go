@@ -88,47 +88,6 @@ func NewService(db *gorm.DB) *Service {
 	return &Service{DB: db}
 }
 
-func (s *Service) ReconcileInviteeAccess(ctx context.Context, user db.User) (db.User, error) {
-	if user.IsAdmin || user.IsSuperAdmin {
-		return user, nil
-	}
-	var externalMemberships int64
-	if err := s.DB.WithContext(ctx).
-		Table("team_members").
-		Joins("JOIN teams ON teams.id = team_members.team_id AND teams.deleted_at IS NULL").
-		Where("team_members.user_id = ? AND team_members.role != ? AND team_members.deleted_at IS NULL AND teams.owner_id != ?", user.ID, db.TeamRoleOwner, user.ID).
-		Count(&externalMemberships).Error; err != nil {
-		return user, err
-	}
-	if externalMemberships == 0 || !user.CanCreateWorkspaces {
-		return user, nil
-	}
-	if err := s.DB.WithContext(ctx).
-		Model(&db.User{}).
-		Where("id = ?", user.ID).
-		Update("can_create_workspaces", false).Error; err != nil {
-		return user, err
-	}
-	user.CanCreateWorkspaces = false
-	return user, nil
-}
-
-// EnsureDefaultWorkspaces gives every user an owned workspace and moves any
-// legacy personal resources into that workspace. The product now treats the
-// active team context as the user's workspace context.
-func (s *Service) EnsureDefaultWorkspaces(ctx context.Context) error {
-	var users []db.User
-	if err := s.DB.WithContext(ctx).Where("deleted_at IS NULL").Find(&users).Error; err != nil {
-		return err
-	}
-	for _, user := range users {
-		if _, err := s.EnsureDefaultWorkspace(ctx, user); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (s *Service) EnsureDefaultWorkspace(ctx context.Context, user db.User) (*db.Team, error) {
 	if !user.CanCreateWorkspaces {
 		return nil, nil
@@ -175,40 +134,7 @@ func (s *Service) EnsureDefaultWorkspace(ctx context.Context, user db.User) (*db
 			team = *created
 		}
 	}
-	if err := s.migratePersonalResourcesToWorkspace(ctx, user.ID, team.ID); err != nil {
-		return nil, err
-	}
 	return &team, nil
-}
-
-func (s *Service) migratePersonalResourcesToWorkspace(ctx context.Context, userID, teamID uuid.UUID) error {
-	return s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		deletedOwnedTeams := tx.Unscoped().
-			Model(&db.Team{}).
-			Select("id").
-			Where("owner_id = ? AND deleted_at IS NOT NULL", userID)
-
-		updates := []struct {
-			model any
-			where string
-		}{
-			{&db.Domain{}, "user_id = ? AND (team_id IS NULL OR team_id IN (?))"},
-			{&db.Inbox{}, "user_id = ? AND (team_id IS NULL OR team_id IN (?))"},
-			{&db.ApiKey{}, "user_id = ? AND (team_id IS NULL OR team_id IN (?))"},
-			{&db.StaticProject{}, "user_id = ? AND (team_id IS NULL OR team_id IN (?))"},
-			{&db.SentEmailLog{}, "user_id = ? AND (team_id IS NULL OR team_id IN (?))"},
-			{&db.ApiKeyUsageLog{}, "user_id = ? AND (team_id IS NULL OR team_id IN (?))"},
-		}
-		for _, update := range updates {
-			if err := tx.Model(update.model).Where(update.where, userID, deletedOwnedTeams).Update("team_id", teamID).Error; err != nil {
-				return err
-			}
-		}
-		if err := tx.Model(&db.AuditLog{}).Where("actor_id = ? AND (team_id IS NULL OR team_id IN (?))", userID, deletedOwnedTeams).Update("team_id", teamID).Error; err != nil {
-			return err
-		}
-		return nil
-	})
 }
 
 // ── Teams CRUD ─────────────────────────────────────────────────────────────
@@ -269,10 +195,6 @@ func (s *Service) ListTeams(ctx context.Context, userID uuid.UUID) ([]TeamSummar
 	if err := s.DB.WithContext(ctx).First(&user, "id = ? AND deleted_at IS NULL", userID).Error; err != nil {
 		return nil, err
 	}
-	user, err := s.ReconcileInviteeAccess(ctx, user)
-	if err != nil {
-		return nil, err
-	}
 
 	var results []struct {
 		db.Team
@@ -289,8 +211,7 @@ func (s *Service) ListTeams(ctx context.Context, userID uuid.UUID) ([]TeamSummar
 	if !user.CanCreateWorkspaces {
 		q = q.Where("team_members.role != ?", db.TeamRoleOwner)
 	}
-	err = q.Scan(&results).Error
-	if err != nil {
+	if err := q.Scan(&results).Error; err != nil {
 		return nil, err
 	}
 
@@ -504,29 +425,6 @@ func (s *Service) InviteMember(ctx context.Context, actorID, teamID uuid.UUID, e
 	if err := ValidateScopes(scopes); err != nil {
 		return nil, err
 	}
-	if err := s.ensureInviteMemberQuota(ctx, teamID); err != nil {
-		return nil, err
-	}
-
-	// Check for duplicate pending invite
-	var existing int64
-	s.DB.WithContext(ctx).Model(&db.TeamInvite{}).
-		Where("team_id = ? AND lower(email) = ? AND status = ?", teamID, email, db.TeamInviteStatusPending).
-		Count(&existing)
-	if existing > 0 {
-		return nil, ErrDuplicateInvite
-	}
-
-	// Check if user is already a member
-	var memberCount int64
-	s.DB.WithContext(ctx).
-		Table("team_members").
-		Joins("JOIN users ON users.id = team_members.user_id").
-		Where("team_members.team_id = ? AND lower(users.email) = ? AND team_members.deleted_at IS NULL", teamID, email).
-		Count(&memberCount)
-	if memberCount > 0 {
-		return nil, ErrAlreadyMember
-	}
 
 	// Generate token
 	plainToken, tokenHash, err := generateToken()
@@ -546,7 +444,39 @@ func (s *Service) InviteMember(ctx context.Context, actorID, teamID uuid.UUID, e
 		ExpiresAt:   time.Now().Add(7 * 24 * time.Hour), // 7 days
 	}
 
-	if err := s.DB.WithContext(ctx).Create(invite).Error; err != nil {
+	// Wrap in transaction to prevent race conditions on quota
+	err = s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := ensureInviteMemberQuota(tx, ctx, teamID); err != nil {
+			return err
+		}
+
+		// Check for duplicate pending invite
+		var existing int64
+		if err := tx.Model(&db.TeamInvite{}).
+			Where("team_id = ? AND lower(email) = ? AND status = ?", teamID, email, db.TeamInviteStatusPending).
+			Count(&existing).Error; err != nil {
+			return err
+		}
+		if existing > 0 {
+			return ErrDuplicateInvite
+		}
+
+		// Check if user is already a member
+		var memberCount int64
+		if err := tx.
+			Table("team_members").
+			Joins("JOIN users ON users.id = team_members.user_id").
+			Where("team_members.team_id = ? AND lower(users.email) = ? AND team_members.deleted_at IS NULL", teamID, email).
+			Count(&memberCount).Error; err != nil {
+			return err
+		}
+		if memberCount > 0 {
+			return ErrAlreadyMember
+		}
+
+		return tx.Create(invite).Error
+	})
+	if err != nil {
 		return nil, err
 	}
 
@@ -607,32 +537,37 @@ func (s *Service) AcceptInvite(ctx context.Context, userID uuid.UUID, token stri
 		return nil, err
 	}
 
-	if invite.Status != db.TeamInviteStatusPending {
-		return nil, ErrInviteNotPending
-	}
+	// Check expired before status to return the correct error
 	if time.Now().After(invite.ExpiresAt) {
 		return nil, ErrInviteExpired
+	}
+	if invite.Status != db.TeamInviteStatusPending {
+		return nil, ErrInviteNotPending
 	}
 	if !strings.EqualFold(user.Email, invite.Email) {
 		return nil, ErrInviteEmailMismatch
 	}
-	if invite.Role != db.TeamRoleOwner {
-		if err := s.ensureActiveMemberQuota(ctx, invite.TeamID); err != nil {
-			return nil, err
-		}
-	}
 
-	// Check if already a member
-	var existingCount int64
-	s.DB.WithContext(ctx).Model(&db.TeamMember{}).
-		Where("team_id = ? AND user_id = ? AND deleted_at IS NULL", invite.TeamID, userID).
-		Count(&existingCount)
-	if existingCount > 0 {
-		return nil, ErrAlreadyMember
-	}
-
+	// Wrap in transaction to prevent race conditions on quota and membership
 	var member *db.TeamMember
 	err := s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if invite.Role != db.TeamRoleOwner {
+			if err := ensureActiveMemberQuota(tx, ctx, invite.TeamID); err != nil {
+				return err
+			}
+		}
+
+		// Check if already a member (inside txn to prevent concurrent accept)
+		var existingCount int64
+		if err := tx.Model(&db.TeamMember{}).
+			Where("team_id = ? AND user_id = ? AND deleted_at IS NULL", invite.TeamID, userID).
+			Count(&existingCount).Error; err != nil {
+			return err
+		}
+		if existingCount > 0 {
+			return ErrAlreadyMember
+		}
+
 		member = &db.TeamMember{
 			TeamID:      invite.TeamID,
 			UserID:      userID,
@@ -740,19 +675,19 @@ func (s *Service) ListPendingInvites(ctx context.Context, actorID, teamID uuid.U
 
 // ── Internal helpers ───────────────────────────────────────────────────────
 
-func (s *Service) ensureInviteMemberQuota(ctx context.Context, teamID uuid.UUID) error {
-	maxMembers, err := s.teamMaxMembers(ctx, teamID)
+func ensureInviteMemberQuota(database *gorm.DB, ctx context.Context, teamID uuid.UUID) error {
+	maxMembers, err := teamMaxMembers(database, ctx, teamID)
 	if err != nil {
 		return err
 	}
 	var activeMembers int64
-	if err := s.DB.WithContext(ctx).Model(&db.TeamMember{}).
+	if err := database.WithContext(ctx).Model(&db.TeamMember{}).
 		Where("team_id = ? AND role != ? AND deleted_at IS NULL", teamID, db.TeamRoleOwner).
 		Count(&activeMembers).Error; err != nil {
 		return err
 	}
 	var pendingInvites int64
-	if err := s.DB.WithContext(ctx).Model(&db.TeamInvite{}).
+	if err := database.WithContext(ctx).Model(&db.TeamInvite{}).
 		Where("team_id = ? AND role != ? AND status = ?", teamID, db.TeamRoleOwner, db.TeamInviteStatusPending).
 		Count(&pendingInvites).Error; err != nil {
 		return err
@@ -763,13 +698,13 @@ func (s *Service) ensureInviteMemberQuota(ctx context.Context, teamID uuid.UUID)
 	return nil
 }
 
-func (s *Service) ensureActiveMemberQuota(ctx context.Context, teamID uuid.UUID) error {
-	maxMembers, err := s.teamMaxMembers(ctx, teamID)
+func ensureActiveMemberQuota(database *gorm.DB, ctx context.Context, teamID uuid.UUID) error {
+	maxMembers, err := teamMaxMembers(database, ctx, teamID)
 	if err != nil {
 		return err
 	}
 	var activeMembers int64
-	if err := s.DB.WithContext(ctx).Model(&db.TeamMember{}).
+	if err := database.WithContext(ctx).Model(&db.TeamMember{}).
 		Where("team_id = ? AND role != ? AND deleted_at IS NULL", teamID, db.TeamRoleOwner).
 		Count(&activeMembers).Error; err != nil {
 		return err
@@ -780,9 +715,9 @@ func (s *Service) ensureActiveMemberQuota(ctx context.Context, teamID uuid.UUID)
 	return nil
 }
 
-func (s *Service) teamMaxMembers(ctx context.Context, teamID uuid.UUID) (int, error) {
+func teamMaxMembers(database *gorm.DB, ctx context.Context, teamID uuid.UUID) (int, error) {
 	var owner db.User
-	err := s.DB.WithContext(ctx).
+	err := database.WithContext(ctx).
 		Joins("JOIN teams ON teams.owner_id = users.id").
 		Where("teams.id = ? AND teams.deleted_at IS NULL", teamID).
 		First(&owner).Error

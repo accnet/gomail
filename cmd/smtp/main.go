@@ -14,7 +14,6 @@ import (
 	relay "gomail/internal/smtp/relay"
 	smtpserver "gomail/internal/smtp/server"
 	"gomail/internal/storage"
-	"gomail/internal/teams"
 	"gomail/pkg/logger"
 )
 
@@ -35,10 +34,6 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	if err := teams.NewService(database).EnsureDefaultWorkspaces(ctx); err != nil {
-		log.Fatal(err)
-	}
 
 	store := storage.NewLocal(cfg.AttachmentStorageRoot)
 	if err := store.Ensure(); err != nil {

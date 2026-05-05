@@ -2629,13 +2629,24 @@ async function renderEmailDetail(emailID) {
     <div class="email-detail">
       <div class="email-detail-header">
         <div class="email-detail-sender">
-          <div class="email-detail-avatar">${initials(latestItem.from_address)}</div>
+          <div class="email-detail-avatar ${latestItem.is_outbound ? 'outbound' : 'inbound'}">${initials(latestItem.from_address)}</div>
           <div class="email-detail-meta">
             <h3 class="email-detail-subject">${escapeHTML(latestItem.subject || "(no subject)")}</h3>
             <p class="email-detail-from">${threadItems.length} message${threadItems.length === 1 ? "" : "s"} in this conversation</p>
             <p class="email-detail-to">Latest: <strong>${escapeHTML(latestItem.is_outbound ? `You to ${latestItem.to_address || "-"}` : latestItem.from_address || "Unknown sender")}</strong></p>
           </div>
           <div class="email-detail-time">${relative(latestItem.at || email.received_at)}</div>
+          <div class="email-actions" id="emailActions-${email.id}">
+            <button class="email-actions-trigger" id="emailActionsTrigger-${email.id}" aria-label="Email actions">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
+            </button>
+            <div class="email-actions-menu hidden" id="emailActionsMenu-${email.id}">
+              <button class="email-actions-item danger" data-delete-email="${email.id}">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                Delete email
+              </button>
+            </div>
+          </div>
         </div>
         <div class="email-reply-actions">
           <button class="btn btn-secondary btn-sm" data-email-compose="reply">Reply</button>
@@ -2717,6 +2728,40 @@ async function renderEmailDetail(emailID) {
     </div>
   `;
 
+  // Email actions dropdown toggle
+  const actionsTrigger = document.getElementById(`emailActionsTrigger-${email.id}`);
+  const actionsMenu = document.getElementById(`emailActionsMenu-${email.id}`);
+  if (actionsTrigger && actionsMenu) {
+    actionsTrigger.onclick = (e) => {
+      e.stopPropagation();
+      actionsMenu.classList.toggle("hidden");
+    };
+    // Close when clicking outside
+    document.addEventListener("click", function closeMenu(e) {
+      if (!actionsTrigger.contains(e.target) && !actionsMenu.contains(e.target)) {
+        actionsMenu.classList.add("hidden");
+      }
+    }, { once: true });
+  }
+
+  // Delete email button
+  document.querySelectorAll("[data-delete-email]").forEach((button) => {
+    button.onclick = async () => {
+      if (!confirm("Delete this email? It will be moved to trash.")) return;
+      try {
+        await api(`/emails/${button.dataset.deleteEmail}`, { method: "DELETE" });
+        // Close the menu
+        const menu = document.getElementById(`emailActionsMenu-${button.dataset.deleteEmail}`);
+        if (menu) menu.classList.add("hidden");
+        // Navigate away from deleted email
+        state.selectedEmailID = null;
+        await renderEmail();
+      } catch (error) {
+        alert(error.message);
+      }
+    };
+  });
+
   document.querySelectorAll("[data-email-compose]").forEach((button) => {
     button.onclick = () => {
       if (!outboundConfigured) {
@@ -2779,7 +2824,7 @@ function renderThreadMessage(item, selectedEmail, isNewest = false) {
     return `
       <article class="gmail-thread-message ${item.id === selectedEmail.id ? "active" : ""} ${item.is_outbound ? "outbound" : ""}">
         <div class="gmail-thread-message-header">
-          <div class="email-detail-avatar gmail-thread-avatar">${initials(sender)}</div>
+          <div class="email-detail-avatar gmail-thread-avatar ${item.is_outbound ? 'outbound' : 'inbound'}">${initials(sender)}</div>
           <div class="gmail-thread-meta">
             <div class="gmail-thread-sender">${escapeHTML(sender)}</div>
             <div class="gmail-thread-subject">${escapeHTML(item.subject || "(no subject)")}</div>
@@ -2796,7 +2841,7 @@ function renderThreadMessage(item, selectedEmail, isNewest = false) {
   return `
     <article class="gmail-thread-message gmail-thread-collapsed ${item.is_outbound ? "outbound" : ""}" id="${msgId}" data-thread-id="${item.id}">
       <div class="gmail-thread-collapsed-header" onclick="document.getElementById('${msgId}').classList.toggle('gmail-thread-expanded')">
-        <div class="email-detail-avatar gmail-thread-avatar">${initials(sender)}</div>
+        <div class="email-detail-avatar gmail-thread-avatar ${item.is_outbound ? 'outbound' : 'inbound'}">${initials(sender)}</div>
         <div class="gmail-thread-meta">
           <div class="gmail-thread-sender">${escapeHTML(sender)}</div>
           <div class="gmail-thread-subject">${escapeHTML(item.subject || "(no subject)")}</div>
@@ -2863,7 +2908,7 @@ function openInlineReplyComposer(email, mode) {
   mount.innerHTML = `
     <form id="replyForm" class="gmail-inline-reply">
       <div class="gmail-inline-reply-header">
-        <div class="email-detail-avatar gmail-thread-avatar">${initials("You")}</div>
+        <div class="email-detail-avatar gmail-thread-avatar outbound">${initials("You")}</div>
         <div class="gmail-inline-reply-fields">
           <div class="gmail-inline-row">
             <span>To</span>

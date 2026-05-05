@@ -664,6 +664,92 @@ func TestListConversationsGroupsInboundAndSentMessages(t *testing.T) {
 	}
 }
 
+func TestListConversationsIgnoresSoftDeletedEmails(t *testing.T) {
+	app, database := newTestApp(t)
+	user := createUser(t, database, "softdelete-conversations@test.local", true, false, false)
+	domain := db.Domain{UserID: user.ID, Name: "softdelete-conversations.test", Status: db.DomainStatusVerified}
+	if err := database.Create(&domain).Error; err != nil {
+		t.Fatal(err)
+	}
+	inbox := db.Inbox{UserID: user.ID, DomainID: domain.ID, LocalPart: "hello", Address: "hello@softdelete-conversations.test", IsActive: true}
+	if err := database.Create(&inbox).Error; err != nil {
+		t.Fatal(err)
+	}
+	conversationID := "softdelete-thread@example.net"
+	active := db.Email{
+		InboxID:        inbox.ID,
+		MessageID:      "active@example.net",
+		ConversationID: conversationID,
+		FromAddress:    "sender@example.net",
+		ToAddress:      inbox.Address,
+		Subject:        "Question",
+		Snippet:        "active",
+		ReceivedAt:     time.Now().Add(-2 * time.Minute),
+		IsRead:         false,
+	}
+	deleted := db.Email{
+		InboxID:        inbox.ID,
+		MessageID:      "deleted@example.net",
+		ConversationID: conversationID,
+		FromAddress:    "sender@example.net",
+		ToAddress:      inbox.Address,
+		Subject:        "Question",
+		Snippet:        "deleted",
+		ReceivedAt:     time.Now().Add(-time.Minute),
+		IsRead:         false,
+	}
+	if err := database.Create(&active).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Create(&deleted).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Delete(&deleted).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	sentAt := time.Now()
+	sent := db.SentEmailLog{
+		UserID:         user.ID,
+		ConversationID: conversationID,
+		Mode:           "reply",
+		FromAddress:    inbox.Address,
+		ToAddress:      "sender@example.net",
+		Subject:        "Re: Question",
+		BodyText:       "reply",
+		Status:         db.SentEmailStatusSent,
+		SentAt:         &sentAt,
+	}
+	if err := database.Create(&sent).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	router := app.Router()
+	token := bearerToken(t, app, user)
+	resp := doJSON(t, router, http.MethodGet, "/api/conversations?page=1&page_size=25", nil, token)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("conversations status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	var body struct {
+		Items []struct {
+			ConversationID string `json:"conversation_id"`
+			PrimaryEmailID string `json:"primary_email_id"`
+			Count          int    `json:"count"`
+			UnreadCount    int    `json:"unread_count"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Items) != 1 {
+		t.Fatalf("items = %+v", body.Items)
+	}
+	got := body.Items[0]
+	if got.ConversationID != conversationID || got.PrimaryEmailID != active.ID.String() || got.Count != 2 || got.UnreadCount != 1 {
+		t.Fatalf("unexpected conversation with soft delete: %+v", got)
+	}
+}
+
 func TestReplyAllNormalizesRecipients(t *testing.T) {
 	app, database := newTestApp(t)
 	user := createUser(t, database, "reply-all@test.local", true, false, false)

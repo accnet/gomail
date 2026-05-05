@@ -1140,6 +1140,68 @@ tbody tr:hover {
   height: 100%;
 }
 
+/* Email actions dropdown ("..." menu) */
+.email-actions {
+  position: relative;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.email-actions-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  color: var(--color-text-tertiary);
+  transition: background 0.15s, color 0.15s;
+}
+
+.email-actions-trigger:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.email-actions-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 180px;
+  padding: 4px;
+  background: var(--color-card-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 32px var(--color-shadow-lg);
+  z-index: 100;
+}
+
+.email-actions-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text);
+  text-align: left;
+  border-radius: var(--radius-sm);
+  transition: background 0.15s;
+}
+
+.email-actions-item:hover {
+  background: var(--color-surface-hover);
+}
+
+.email-actions-item.danger {
+  color: var(--color-danger);
+}
+
+.email-actions-item.danger:hover {
+  background: var(--color-danger-light);
+}
+
 .email-detail-header {
   padding: 20px;
   border-bottom: 1px solid var(--color-border-light);
@@ -1163,6 +1225,14 @@ tbody tr:hover {
   font-size: 16px;
   font-weight: 600;
   flex-shrink: 0;
+}
+
+.email-detail-avatar.inbound {
+  background: var(--color-primary);
+}
+
+.email-detail-avatar.outbound {
+  background: var(--color-success);
 }
 
 .email-detail-meta {

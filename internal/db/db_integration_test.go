@@ -1,8 +1,11 @@
 package db
 
 import (
+	"context"
 	"testing"
 	"time"
+
+	"gomail/internal/config"
 
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
@@ -135,5 +138,73 @@ func TestBackfillEmailThreadingFromHeaders(t *testing.T) {
 	}
 	if gotChild.ConversationID != gotParent.ConversationID {
 		t.Fatalf("child conversation = %q want %q", gotChild.ConversationID, gotParent.ConversationID)
+	}
+}
+
+func TestSeedDemoDataDeduplicatesNormalizedEmails(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := AutoMigrate(database); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Config{
+		DefaultAdminEmail:               "admin@example.com",
+		DefaultAdminPassword:            "secret",
+		DefaultAdminName:                "Admin",
+		DefaultAdminMaxDomains:          10,
+		DefaultAdminMaxInboxes:          10,
+		DefaultAdminMaxMembers:          10,
+		DefaultAdminMaxMessageSizeMB:    25,
+		DefaultAdminMaxAttachmentSizeMB: 25,
+		DefaultAdminMaxStorageGB:        10,
+		DefaultAdminMaxWebsites:         10,
+		MXTarget:                        "mx.localhost",
+	}
+	ctx := context.Background()
+	if err := SeedSuperAdmin(ctx, database, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := SeedDemoData(ctx, database, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	var inbox Inbox
+	if err := database.Where("address = ?", "hello@site1.localhost").First(&inbox).Error; err != nil {
+		t.Fatal(err)
+	}
+	duplicate := Email{
+		InboxID:        inbox.ID,
+		MessageID:      "<demo-welcome@gomail.local>",
+		ConversationID: "",
+		FromAddress:    "team@gomail.local",
+		ToAddress:      inbox.Address,
+		Subject:        "Welcome to GoMail",
+		ReceivedAt:     time.Now(),
+		Snippet:        "duplicate",
+		TextBody:       "duplicate",
+	}
+	if err := database.Create(&duplicate).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SeedDemoData(ctx, database, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	var rows []Email
+	if err := database.Where("from_address = ? AND subject = ?", "team@gomail.local", "Welcome to GoMail").Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("welcome row count = %d want 1", len(rows))
+	}
+	if rows[0].MessageID != "demo-welcome@gomail.local" {
+		t.Fatalf("message_id = %q want demo-welcome@gomail.local", rows[0].MessageID)
+	}
+	if rows[0].ConversationID != "demo-welcome@gomail.local" {
+		t.Fatalf("conversation_id = %q want demo-welcome@gomail.local", rows[0].ConversationID)
 	}
 }

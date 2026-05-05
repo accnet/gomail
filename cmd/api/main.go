@@ -59,10 +59,6 @@ func main() {
 		}
 	}
 	teamSvc := teams.NewService(database)
-	if err := teamSvc.EnsureDefaultWorkspaces(ctx); err != nil {
-		logg.Error("seed default workspaces failed", "error", err)
-		log.Fatal(err)
-	}
 
 	redisClient := realtime.NewRedis(cfg.RedisAddr, cfg.RedisPass, cfg.RedisDB)
 	authSvc := auth.NewService(database, cfg)
