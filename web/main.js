@@ -328,6 +328,34 @@ function conversationItems(payload) {
   return Array.isArray(payload) ? payload : (payload?.items || []);
 }
 
+async function markConversationRead(emailID) {
+  const conversation = state.conversations.find((item) => item.primary_email_id === emailID);
+  if (!conversation || Number(conversation.unread_count || 0) < 1) return false;
+
+  let inboundIDs = [emailID];
+  try {
+    const thread = await api(`/emails/${emailID}/thread`);
+    const threadItems = Array.isArray(thread?.items) ? thread.items : [];
+    const threadInboundIDs = threadItems
+      .filter((item) => !item.is_outbound && item.id)
+      .map((item) => item.id);
+    if (threadInboundIDs.length) inboundIDs = threadInboundIDs;
+  } catch (_) {
+    // Fall back to marking the selected inbound email as read.
+  }
+
+  const uniqueInboundIDs = [...new Set(inboundIDs)];
+  const results = await Promise.allSettled(
+    uniqueInboundIDs.map((id) => api(`/emails/${id}/read`, { method: "PATCH" }))
+  );
+  const updated = results.some((result) => result.status === "fulfilled");
+  if (updated) {
+    conversation.unread_count = 0;
+    conversation.is_read = true;
+  }
+  return updated;
+}
+
 function relative(iso) {
   if (!iso) return "Never";
   const date = new Date(iso);
@@ -2603,6 +2631,11 @@ async function renderEmail() {
 
 async function renderEmailDetail(emailID) {
   state.selectedEmailID = emailID;
+  const markedRead = await markConversationRead(emailID);
+  if (markedRead) {
+    await renderEmail();
+    return;
+  }
   const email = await api(`/emails/${emailID}`);
   let thread = null;
   let replyStatus = { configured: Boolean(state.outbound?.configured), sender_domain_ready: true };

@@ -1260,34 +1260,32 @@ func firstNonEmpty(values ...string) string {
 
 func (a App) markRead(c *gin.Context) {
 	ctx := teams.FromGin(c)
-	q := a.DB.Table("emails").
-		Joins("JOIN inboxes ON inboxes.id = emails.inbox_id").
-		Where("emails.id = ?", c.Param("id"))
+	query := "UPDATE emails SET is_read = ? WHERE id = ? AND inbox_id IN (SELECT id FROM inboxes WHERE "
+	args := []any{true, c.Param("id")}
 	if ctx.Personal {
-		q = q.Where("inboxes.user_id = ? AND inboxes.team_id IS NULL", ctx.UserID)
+		query += "user_id = ? AND team_id IS NULL)"
+		args = append(args, ctx.UserID)
 	} else {
-		q = q.Where("inboxes.team_id = ?", ctx.TeamID)
+		query += "team_id = ?)"
+		args = append(args, ctx.TeamID)
 	}
-	q.Update("is_read", true)
+	a.DB.Exec(query, args...)
 	response.OK(c, gin.H{"ok": true})
 }
 
 func (a App) deleteEmail(c *gin.Context) {
 	ctx := teams.FromGin(c)
-
-	// Build inbox authorization subquery
-	inboxQ := a.DB.Table("inboxes").Select("id")
+	query := "UPDATE emails SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL AND inbox_id IN (SELECT id FROM inboxes WHERE "
+	args := []any{time.Now(), c.Param("id")}
 	if ctx.Personal {
-		inboxQ = inboxQ.Where("user_id = ? AND team_id IS NULL", ctx.UserID)
+		query += "user_id = ? AND team_id IS NULL)"
+		args = append(args, ctx.UserID)
 	} else {
-		inboxQ = inboxQ.Where("team_id = ?", ctx.TeamID)
+		query += "team_id = ?)"
+		args = append(args, ctx.TeamID)
 	}
 
-	result := a.DB.Table("emails").
-		Where("id = ?", c.Param("id")).
-		Where("inbox_id IN (?)", inboxQ).
-		Where("deleted_at IS NULL").
-		Update("deleted_at", time.Now())
+	result := a.DB.Exec(query, args...)
 
 	if result.Error != nil {
 		response.Error(c, http.StatusInternalServerError, "delete_failed", result.Error.Error())

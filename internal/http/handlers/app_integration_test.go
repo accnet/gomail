@@ -110,6 +110,26 @@ func createVerifiedDomainEmailAuth(t *testing.T, database *gorm.DB, domain db.Do
 	}
 }
 
+func createTeamInboxFixture(t *testing.T, app *App, database *gorm.DB, ownerEmail, teamName, domainName, localPart string) (db.User, db.Team, db.Domain, db.Inbox) {
+	t.Helper()
+	app.Teams = teamservice.NewService(database)
+
+	owner := createUser(t, database, ownerEmail, true, true, false)
+	team, err := app.Teams.CreateTeam(context.Background(), owner.ID, teamName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	domain := db.Domain{UserID: owner.ID, TeamID: &team.ID, Name: domainName, Status: db.DomainStatusVerified}
+	if err := database.Create(&domain).Error; err != nil {
+		t.Fatal(err)
+	}
+	inbox := db.Inbox{UserID: owner.ID, TeamID: &team.ID, DomainID: domain.ID, LocalPart: localPart, Address: localPart + "@" + domain.Name, IsActive: true}
+	if err := database.Create(&inbox).Error; err != nil {
+		t.Fatal(err)
+	}
+	return owner, *team, domain, inbox
+}
+
 func bearerToken(t *testing.T, app App, user db.User) string {
 	t.Helper()
 	token, err := app.Auth.AccessToken(user)
@@ -138,6 +158,8 @@ func doJSON(t *testing.T, router http.Handler, method, path string, body any, to
 	router.ServeHTTP(w, req)
 	return w
 }
+
+// Email mutation regressions.
 
 func TestLoginBootstrapProfileFlow(t *testing.T) {
 	app, database := newTestApp(t)
@@ -747,6 +769,238 @@ func TestListConversationsIgnoresSoftDeletedEmails(t *testing.T) {
 	got := body.Items[0]
 	if got.ConversationID != conversationID || got.PrimaryEmailID != active.ID.String() || got.Count != 2 || got.UnreadCount != 1 {
 		t.Fatalf("unexpected conversation with soft delete: %+v", got)
+	}
+}
+
+func TestMarkReadClearsConversationUnreadCount(t *testing.T) {
+	app, database := newTestApp(t)
+	user := createUser(t, database, "markread-conversations@test.local", true, false, false)
+	domain := db.Domain{UserID: user.ID, Name: "markread-conversations.test", Status: db.DomainStatusVerified}
+	if err := database.Create(&domain).Error; err != nil {
+		t.Fatal(err)
+	}
+	inbox := db.Inbox{UserID: user.ID, DomainID: domain.ID, LocalPart: "hello", Address: "hello@markread-conversations.test", IsActive: true}
+	if err := database.Create(&inbox).Error; err != nil {
+		t.Fatal(err)
+	}
+	email := db.Email{
+		InboxID:        inbox.ID,
+		MessageID:      "markread@example.net",
+		ConversationID: "markread@example.net",
+		FromAddress:    "sender@example.net",
+		ToAddress:      inbox.Address,
+		Subject:        "Question",
+		Snippet:        "unread",
+		ReceivedAt:     time.Now(),
+		IsRead:         false,
+	}
+	if err := database.Create(&email).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	router := app.Router()
+	token := bearerToken(t, app, user)
+
+	markResp := doJSON(t, router, http.MethodPatch, "/api/emails/"+email.ID.String()+"/read", nil, token)
+	if markResp.Code != http.StatusOK {
+		t.Fatalf("mark read status = %d body=%s", markResp.Code, markResp.Body.String())
+	}
+
+	resp := doJSON(t, router, http.MethodGet, "/api/conversations?page=1&page_size=25", nil, token)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("conversations status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	var body struct {
+		Items []struct {
+			PrimaryEmailID string `json:"primary_email_id"`
+			UnreadCount    int    `json:"unread_count"`
+			IsRead         bool   `json:"is_read"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Items) != 1 {
+		t.Fatalf("items = %+v", body.Items)
+	}
+	got := body.Items[0]
+	if got.PrimaryEmailID != email.ID.String() || got.UnreadCount != 0 || !got.IsRead {
+		t.Fatalf("unexpected conversation after mark read: %+v", got)
+	}
+
+	var updated db.Email
+	if err := database.First(&updated, "id = ?", email.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !updated.IsRead {
+		t.Fatalf("expected email to be marked read: %+v", updated)
+	}
+}
+
+func TestMarkReadClearsConversationUnreadCountInTeamContext(t *testing.T) {
+	app, database := newTestApp(t)
+	owner, team, _, inbox := createTeamInboxFixture(t, &app, database, "team-markread@test.local", "Mail Team", "team-markread.test", "hello")
+	email := db.Email{
+		InboxID:        inbox.ID,
+		MessageID:      "team-markread@example.net",
+		ConversationID: "team-markread@example.net",
+		FromAddress:    "sender@example.net",
+		ToAddress:      inbox.Address,
+		Subject:        "Question",
+		Snippet:        "unread",
+		ReceivedAt:     time.Now(),
+		IsRead:         false,
+	}
+	if err := database.Create(&email).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	router := app.Router()
+	token := bearerToken(t, app, owner)
+
+	markResp := doJSONWithTeam(t, router, http.MethodPatch, "/api/emails/"+email.ID.String()+"/read", nil, token, team.ID.String())
+	if markResp.Code != http.StatusOK {
+		t.Fatalf("team mark read status = %d body=%s", markResp.Code, markResp.Body.String())
+	}
+
+	resp := doJSONWithTeam(t, router, http.MethodGet, "/api/conversations?page=1&page_size=25", nil, token, team.ID.String())
+	if resp.Code != http.StatusOK {
+		t.Fatalf("team conversations status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	var body struct {
+		Items []struct {
+			PrimaryEmailID string `json:"primary_email_id"`
+			UnreadCount    int    `json:"unread_count"`
+			IsRead         bool   `json:"is_read"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Items) != 1 {
+		t.Fatalf("items = %+v", body.Items)
+	}
+	got := body.Items[0]
+	if got.PrimaryEmailID != email.ID.String() || got.UnreadCount != 0 || !got.IsRead {
+		t.Fatalf("unexpected team conversation after mark read: %+v", got)
+	}
+
+	var updated db.Email
+	if err := database.First(&updated, "id = ?", email.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !updated.IsRead {
+		t.Fatalf("expected team email to be marked read: %+v", updated)
+	}
+}
+
+func TestDeleteEmailRemovesConversationAndSoftDeletesRow(t *testing.T) {
+	app, database := newTestApp(t)
+	user := createUser(t, database, "deleteemail-conversations@test.local", true, false, false)
+	domain := db.Domain{UserID: user.ID, Name: "deleteemail-conversations.test", Status: db.DomainStatusVerified}
+	if err := database.Create(&domain).Error; err != nil {
+		t.Fatal(err)
+	}
+	inbox := db.Inbox{UserID: user.ID, DomainID: domain.ID, LocalPart: "hello", Address: "hello@deleteemail-conversations.test", IsActive: true}
+	if err := database.Create(&inbox).Error; err != nil {
+		t.Fatal(err)
+	}
+	email := db.Email{
+		InboxID:        inbox.ID,
+		MessageID:      "deleteemail@example.net",
+		ConversationID: "deleteemail@example.net",
+		FromAddress:    "sender@example.net",
+		ToAddress:      inbox.Address,
+		Subject:        "Delete me",
+		Snippet:        "to be removed",
+		ReceivedAt:     time.Now(),
+		IsRead:         false,
+	}
+	if err := database.Create(&email).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	router := app.Router()
+	token := bearerToken(t, app, user)
+
+	deleteResp := doJSON(t, router, http.MethodDelete, "/api/emails/"+email.ID.String(), nil, token)
+	if deleteResp.Code != http.StatusOK {
+		t.Fatalf("delete email status = %d body=%s", deleteResp.Code, deleteResp.Body.String())
+	}
+
+	resp := doJSON(t, router, http.MethodGet, "/api/conversations?page=1&page_size=25", nil, token)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("conversations status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	var body struct {
+		Items []struct {
+			PrimaryEmailID string `json:"primary_email_id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Items) != 0 {
+		t.Fatalf("expected deleted email conversation to be removed, got %+v", body.Items)
+	}
+
+	var deleted db.Email
+	if err := database.Unscoped().First(&deleted, "id = ?", email.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !deleted.DeletedAt.Valid {
+		t.Fatalf("expected email to be soft deleted: %+v", deleted)
+	}
+}
+
+func TestDeleteEmailRemovesConversationAndSoftDeletesRowInTeamContext(t *testing.T) {
+	app, database := newTestApp(t)
+	owner, team, _, inbox := createTeamInboxFixture(t, &app, database, "team-deleteemail@test.local", "Delete Team", "team-deleteemail.test", "hello")
+	email := db.Email{
+		InboxID:        inbox.ID,
+		MessageID:      "team-deleteemail@example.net",
+		ConversationID: "team-deleteemail@example.net",
+		FromAddress:    "sender@example.net",
+		ToAddress:      inbox.Address,
+		Subject:        "Delete me",
+		Snippet:        "to be removed",
+		ReceivedAt:     time.Now(),
+		IsRead:         false,
+	}
+	if err := database.Create(&email).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	router := app.Router()
+	token := bearerToken(t, app, owner)
+
+	deleteResp := doJSONWithTeam(t, router, http.MethodDelete, "/api/emails/"+email.ID.String(), nil, token, team.ID.String())
+	if deleteResp.Code != http.StatusOK {
+		t.Fatalf("team delete email status = %d body=%s", deleteResp.Code, deleteResp.Body.String())
+	}
+
+	resp := doJSONWithTeam(t, router, http.MethodGet, "/api/conversations?page=1&page_size=25", nil, token, team.ID.String())
+	if resp.Code != http.StatusOK {
+		t.Fatalf("team conversations status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	var body struct {
+		Items []struct {
+			PrimaryEmailID string `json:"primary_email_id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Items) != 0 {
+		t.Fatalf("expected deleted team email conversation to be removed, got %+v", body.Items)
+	}
+
+	var deleted db.Email
+	if err := database.Unscoped().First(&deleted, "id = ?", email.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !deleted.DeletedAt.Valid {
+		t.Fatalf("expected team email to be soft deleted: %+v", deleted)
 	}
 }
 

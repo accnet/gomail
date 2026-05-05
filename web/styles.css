@@ -1087,7 +1087,11 @@ tbody tr:hover {
   text-overflow: ellipsis;
 }
 
-.email-item.unread .email-item-subject,
+.email-item.unread .email-item-subject {
+  font-weight: 700;
+  color: var(--color-primary);
+}
+
 .email-item.unread .email-item-from {
   font-weight: 700;
 }
