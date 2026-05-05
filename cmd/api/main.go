@@ -19,6 +19,7 @@ import (
 	"gomail/internal/smtp/relay"
 	"gomail/internal/staticprojects"
 	"gomail/internal/storage"
+	"gomail/internal/teams"
 	"gomail/pkg/logger"
 
 	"log/slog"
@@ -57,6 +58,11 @@ func main() {
 			log.Fatal(err)
 		}
 	}
+	teamSvc := teams.NewService(database)
+	if err := teamSvc.EnsureDefaultWorkspaces(ctx); err != nil {
+		logg.Error("seed default workspaces failed", "error", err)
+		log.Fatal(err)
+	}
 
 	redisClient := realtime.NewRedis(cfg.RedisAddr, cfg.RedisPass, cfg.RedisDB)
 	authSvc := auth.NewService(database, cfg)
@@ -80,10 +86,11 @@ func main() {
 	go thumbnailWorker.Run(ctx, time.Minute)
 
 	staticHandler := handlers.NewStaticProjectsHandler(staticSvc)
-	siteMiddleware := handlers.NewStaticSiteMiddleware(database, cfg.SaaSDomain)
+	siteMiddleware := handlers.NewStaticSiteMiddleware(database, cfg.SaaSDomain, cfg.LandingRoot)
 	app := handlers.App{
 		DB:                   database,
 		Auth:                 authSvc,
+		Teams:                teamSvc,
 		Config:               cfg,
 		Redis:                redisClient,
 		Verifier:             verifier,

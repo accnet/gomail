@@ -13,7 +13,10 @@ import (
 	"gorm.io/gorm"
 )
 
-const contextKeyApiKey = "gomail_api_key"
+const (
+	contextKeyApiKey       = "gomail_api_key"
+	contextKeyApiKeyTeamID = "gomail_api_key_team_id"
+)
 
 func ApiKeyAuth(database *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -47,6 +50,7 @@ func ApiKeyAuth(database *gorm.DB) gin.HandlerFunc {
 		}
 
 		c.Set(contextKeyApiKey, &apiKey)
+		c.Set(contextKeyApiKeyTeamID, apiKey.TeamID)
 		c.Next()
 	}
 }
@@ -54,6 +58,15 @@ func ApiKeyAuth(database *gorm.DB) gin.HandlerFunc {
 func GetApiKey(c *gin.Context) *db.ApiKey {
 	if k, ok := c.Get(contextKeyApiKey); ok {
 		return k.(*db.ApiKey)
+	}
+	return nil
+}
+
+func GetApiKeyTeamID(c *gin.Context) *uuid.UUID {
+	if v, ok := c.Get(contextKeyApiKeyTeamID); ok {
+		if tid, ok2 := v.(*uuid.UUID); ok2 {
+			return tid
+		}
 	}
 	return nil
 }

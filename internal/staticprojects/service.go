@@ -34,9 +34,34 @@ var (
 	ErrDomainNotAvailable  = errors.New("no custom domain assigned")
 	ErrDomainNotVerified   = errors.New("domain is not verified")
 	ErrDomainAlreadyBound  = errors.New("domain is already bound to another project")
+	ErrDomainReserved      = errors.New("domain is reserved for the SaaS application")
 	ErrSSLConditionNotMet  = errors.New("SSL conditions not met – domain must be verified and DNS must point to this server")
 	ErrPublishFailed       = errors.New("publish failed")
 )
+
+// OwnerContext represents the resource owner context (personal or team).
+type OwnerContext struct {
+	UserID uuid.UUID
+	TeamID *uuid.UUID
+}
+
+func (oc OwnerContext) IsTeam() bool { return oc.TeamID != nil }
+
+// scopeToOwner filters queries by the owner context (personal or team).
+func (s *Service) scopeToOwner(q *gorm.DB, oc OwnerContext) *gorm.DB {
+	if oc.IsTeam() {
+		return q.Where("static_projects.team_id = ?", oc.TeamID)
+	}
+	return q.Where("static_projects.user_id = ? AND static_projects.team_id IS NULL", oc.UserID)
+}
+
+// scopeDomainsToOwner filters domain queries by owner context for domain binding validation.
+func (s *Service) scopeDomainsToOwner(q *gorm.DB, oc OwnerContext) *gorm.DB {
+	if oc.IsTeam() {
+		return q.Where("domains.team_id = ?", oc.TeamID)
+	}
+	return q.Where("domains.user_id = ? AND domains.team_id IS NULL", oc.UserID)
+}
 
 // ---------------------------------------------------------------------------
 // Service
@@ -265,12 +290,12 @@ func (s *Service) publishArchive(ctx context.Context, userID uuid.UUID, name str
 		s.provisionCustomDomainTLS(reloaded)
 	}
 
-	return s.reloadAndRespond(project.ID, userID)
+	return s.reloadAndRespond(project.ID, OwnerContext{UserID: userID})
 }
 
 func (s *Service) failProject(projectID, userID uuid.UUID, errMsg string) (*ProjectResponse, error) {
 	s.markProjectFailed(projectID, errMsg)
-	return s.reloadAndRespond(projectID, userID)
+	return s.reloadAndRespond(projectID, OwnerContext{UserID: userID})
 }
 
 func (s *Service) markProjectFailed(projectID uuid.UUID, errMsg string) {
@@ -307,12 +332,14 @@ func (s *Service) redeployArchive(ctx context.Context, userID uuid.UUID, project
 // CRUD
 // ---------------------------------------------------------------------------
 
-// List returns all static projects for a user.
-func (s *Service) List(userID uuid.UUID) ([]ProjectResponse, error) {
+// List returns all static projects for an owner context (personal or team).
+func (s *Service) List(oc OwnerContext) ([]ProjectResponse, error) {
 	var projects []db.StaticProject
-	s.DB.Where("user_id = ?", userID).Order("created_at desc").Find(&projects)
+	q := s.DB.Model(&db.StaticProject{})
+	q = s.scopeToOwner(q, oc)
+	q.Order("created_at desc").Find(&projects)
 
-	used, max, _ := s.QuotaInfo(userID)
+	used, max, _ := s.QuotaInfo(oc.UserID)
 	responses := make([]ProjectResponse, len(projects))
 	for i := range projects {
 		responses[i] = ProjectResponse{
@@ -325,20 +352,24 @@ func (s *Service) List(userID uuid.UUID) ([]ProjectResponse, error) {
 	return responses, nil
 }
 
-// Get returns a single project by ID, checking ownership.
-func (s *Service) Get(userID uuid.UUID, projectID uuid.UUID) (*ProjectResponse, error) {
+// Get returns a single project by ID, checking ownership via owner context.
+func (s *Service) Get(oc OwnerContext, projectID uuid.UUID) (*ProjectResponse, error) {
 	var project db.StaticProject
-	if err := s.DB.First(&project, "id = ? AND user_id = ?", projectID, userID).Error; err != nil {
+	q := s.DB.Where("id = ?", projectID)
+	q = s.scopeToOwner(q, oc)
+	if err := q.First(&project).Error; err != nil {
 		return nil, ErrNotFound
 	}
-	used, max, _ := s.QuotaInfo(userID)
+	used, max, _ := s.QuotaInfo(oc.UserID)
 	return toProjectResponse(&project, used, max), nil
 }
 
 // Delete soft-deletes a project and cleans up its files.
-func (s *Service) Delete(userID uuid.UUID, projectID uuid.UUID) error {
+func (s *Service) Delete(oc OwnerContext, projectID uuid.UUID) error {
 	var project db.StaticProject
-	if err := s.DB.First(&project, "id = ? AND user_id = ?", projectID, userID).Error; err != nil {
+	q := s.DB.Where("id = ?", projectID)
+	q = s.scopeToOwner(q, oc)
+	if err := q.First(&project).Error; err != nil {
 		return ErrNotFound
 	}
 	// Cleanup domain binding if any
@@ -353,13 +384,16 @@ func (s *Service) Delete(userID uuid.UUID, projectID uuid.UUID) error {
 }
 
 // ToggleStatus enables or disables a project.
-func (s *Service) ToggleStatus(userID uuid.UUID, projectID uuid.UUID, isActive bool) (*ProjectResponse, error) {
+func (s *Service) ToggleStatus(oc OwnerContext, projectID uuid.UUID, isActive bool) (*ProjectResponse, error) {
 	var project db.StaticProject
-	if err := s.DB.First(&project, "id = ? AND user_id = ?", projectID, userID).Error; err != nil {
+	q := s.DB.Where("id = ?", projectID)
+	q = s.scopeToOwner(q, oc)
+	if err := q.First(&project).Error; err != nil {
 		return nil, ErrNotFound
 	}
 	s.DB.Model(&project).Update("is_active", isActive)
-	return s.reloadAndRespond(projectID, userID)
+	used, max, _ := s.QuotaInfo(oc.UserID)
+	return toProjectResponse(&project, used, max), nil
 }
 
 func (s *Service) enqueueThumbnailGeneration(project db.StaticProject) {

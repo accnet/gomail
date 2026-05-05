@@ -32,7 +32,7 @@ func (s *Service) AvailableDomains(userID uuid.UUID) ([]db.Domain, error) {
 
 	var available []db.Domain
 	for _, d := range domains {
-		if !boundMap[d.ID] {
+		if !boundMap[d.ID] && !s.isSaaSDomain(d.Name) {
 			available = append(available, d)
 		}
 	}
@@ -50,6 +50,9 @@ func (s *Service) AssignDomain(userID uuid.UUID, projectID uuid.UUID, domainID u
 	if err := s.DB.First(&domain, "id = ? AND user_id = ? AND status = ?", domainID, userID, "verified").Error; err != nil {
 		return nil, ErrDomainNotVerified
 	}
+	if s.isSaaSDomain(domain.Name) {
+		return nil, ErrDomainReserved
+	}
 
 	// Check if domain is already bound
 	var existing int64
@@ -64,7 +67,15 @@ func (s *Service) AssignDomain(userID uuid.UUID, projectID uuid.UUID, domainID u
 		"domain_binding_status": "assigned",
 	})
 	s.DB.First(&project, "id = ?", project.ID)
-	return s.reloadAndRespond(projectID, userID)
+	return s.reloadAndRespond(projectID, OwnerContext{UserID: userID})
+}
+
+func (s *Service) isSaaSDomain(domainName string) bool {
+	return normalizeDomainName(domainName) != "" && normalizeDomainName(domainName) == normalizeDomainName(s.Config.SaaSDomain)
+}
+
+func normalizeDomainName(domainName string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domainName)), ".")
 }
 
 // UnassignDomain removes domain binding from a project.
@@ -85,7 +96,7 @@ func (s *Service) UnassignDomain(userID uuid.UUID, projectID uuid.UUID) (*Projec
 		"domain_tls_enabled_at":    nil,
 	})
 	s.DB.First(&project, "id = ?", project.ID)
-	return s.reloadAndRespond(projectID, userID)
+	return s.reloadAndRespond(projectID, OwnerContext{UserID: userID})
 }
 
 // CheckDomainIP checks if the domain's A/AAAA record points to the configured IP.
@@ -160,7 +171,7 @@ func (s *Service) ActiveSSL(userID uuid.UUID, projectID uuid.UUID) (*ProjectResp
 		"domain_tls_enabled_at": &now,
 	})
 	s.DB.First(&project, "id = ?", project.ID)
-	return s.reloadAndRespond(projectID, userID)
+	return s.reloadAndRespond(projectID, OwnerContext{UserID: userID})
 }
 
 // checkSSLCondition verifies whether SSL can be provisioned for the project.

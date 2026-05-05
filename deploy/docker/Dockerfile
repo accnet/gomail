@@ -17,7 +17,7 @@ CMD ["/app/api"]
 FROM alpine:3.20 AS smtp
 WORKDIR /app
 COPY --from=build /out/smtp /app/smtp
-EXPOSE 25
+EXPOSE 2525
 CMD ["/app/smtp"]
 
 FROM alpine:3.20 AS static-server

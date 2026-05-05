@@ -1,17 +1,51 @@
-# GoMail Teams — Implementation Plan
+# GoMail Teams - Implementation Plan
 
-## Overview
+## Trạng thái hiện tại (baseline)
 
-Add multi-user teams so a group of users can share domains, inboxes, API keys, and static projects. Currently everything is single-user (`user_id` ownership).
+Codebase là single-user. Mọi resource (`Domain`, `Inbox`, `ApiKey`, `StaticProject`, `SentEmailLog`, `ApiKeyUsageLog`, `AuditLog`) đều scope bằng `user_id`. Chưa có migration 005, chưa có package `internal/teams`, chưa có field `team_id` trên bất kỳ bảng nào.
 
----
+Các file cần sửa chính:
+- `internal/db/models.go`
+- `internal/db/migrations/` (thêm `005_teams.sql`)
+- `internal/http/handlers/app.go` (`App` struct + routes)
+- `internal/http/middleware/auth.go` và `apikey_auth.go`
+- `internal/realtime/realtime.go` (`Event` struct)
+- `internal/staticprojects/service.go`
+- `web/` (frontend)
+
+## Quyết định thiết kế
+
+### Ownership model
+
+Giữ nguyên `user_id NOT NULL` trên tất cả bảng hiện tại — không viết lại quota/admin/SMTP logic. Thêm `team_id UUID NULL` vào các bảng chia sẻ được.
+
+- Personal resource: `team_id IS NULL`, `user_id` là chủ sở hữu.
+- Team resource: `team_id IS NOT NULL`, `user_id` là người tạo / quota anchor.
+
+### Active context
+
+Mỗi request đi vào một trong hai chế độ:
+
+- **Personal**: không có `X-Team-Id`.
+- **Team**: header `X-Team-Id` hợp lệ và user là member active.
+
+Backend không được tin `X-Team-Id` cho đến khi đã verify membership.
+
+### Permission model
+
+- `owner`: tất cả scopes, không thể giảm.
+- `admin`: tất cả scopes trừ `team:delete`.
+- `member`: chỉ đọc mặc định.
+
+Scopes lưu trong `team_members.permissions JSONB`. Dùng `datatypes.JSON` (gorm.io/datatypes) cho phù hợp với pattern hiện tại của codebase (xem `Email.ReferencesMessageIDs`, `AuditLog.Payload`).
 
 ## Phase 1: Database
 
-### 1.1 New Tables
+### 1.1 New Migration
+
+Create `internal/db/migrations/005_teams.sql`.
 
 ```sql
--- teams
 CREATE TABLE teams (
     id          UUID PRIMARY KEY,
     name        TEXT NOT NULL,
@@ -20,183 +54,280 @@ CREATE TABLE teams (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     deleted_at  TIMESTAMPTZ
 );
-CREATE INDEX idx_teams_owner ON teams(owner_id) WHERE deleted_at IS NULL;
 
--- team_members
+CREATE INDEX idx_teams_owner
+    ON teams(owner_id)
+    WHERE deleted_at IS NULL;
+
 CREATE TABLE team_members (
     id          UUID PRIMARY KEY,
     team_id     UUID NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
     user_id     UUID NOT NULL REFERENCES users(id),
-    role        TEXT NOT NULL DEFAULT 'member',  -- owner | admin | member
+    role        TEXT NOT NULL DEFAULT 'member',
+    permissions JSONB NOT NULL DEFAULT '[]'::jsonb,
     joined_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     deleted_at  TIMESTAMPTZ,
-    UNIQUE(team_id, user_id)
+    CONSTRAINT chk_team_member_role CHECK (role IN ('owner', 'admin', 'member'))
 );
-CREATE INDEX idx_team_members_user ON team_members(user_id) WHERE deleted_at IS NULL;
 
--- team_invites
+CREATE UNIQUE INDEX idx_team_members_team_user_active
+    ON team_members(team_id, user_id)
+    WHERE deleted_at IS NULL;
+
+CREATE INDEX idx_team_members_user_active
+    ON team_members(user_id)
+    WHERE deleted_at IS NULL;
+
 CREATE TABLE team_invites (
     id          UUID PRIMARY KEY,
     team_id     UUID NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
     email       TEXT NOT NULL,
     role        TEXT NOT NULL DEFAULT 'member',
+    permissions JSONB NOT NULL DEFAULT '[]'::jsonb,
     inviter_id  UUID NOT NULL REFERENCES users(id),
-    status      TEXT NOT NULL DEFAULT 'pending',  -- pending | accepted | declined | expired
-    token       TEXT NOT NULL UNIQUE,
+    status      TEXT NOT NULL DEFAULT 'pending',
+    token_hash  TEXT NOT NULL UNIQUE,
     expires_at  TIMESTAMPTZ NOT NULL,
+    accepted_at TIMESTAMPTZ,
+    declined_at TIMESTAMPTZ,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chk_team_invite_role CHECK (role IN ('admin', 'member')),
+    CONSTRAINT chk_team_invite_status CHECK (status IN ('pending', 'accepted', 'declined', 'expired', 'cancelled'))
 );
-CREATE INDEX idx_team_invites_team ON team_invites(team_id);
-CREATE INDEX idx_team_invites_email ON team_invites(email);
-CREATE INDEX idx_team_invites_token ON team_invites(token);
+
+CREATE INDEX idx_team_invites_team
+    ON team_invites(team_id);
+
+CREATE INDEX idx_team_invites_email
+    ON team_invites(lower(email));
+
+CREATE UNIQUE INDEX idx_team_invites_pending_email
+    ON team_invites(team_id, lower(email))
+    WHERE status = 'pending';
 ```
+
+Use `token_hash`, not a plaintext token. The API can return the plaintext token once when the invite is created, similar to API key one-time reveal.
 
 ### 1.2 Alter Existing Tables
 
-Add nullable `team_id` to resources that can be team-owned:
-
 ```sql
-ALTER TABLE domains      ADD COLUMN team_id UUID REFERENCES teams(id);
-ALTER TABLE inboxes      ADD COLUMN team_id UUID REFERENCES teams(id);
-ALTER TABLE api_keys     ADD COLUMN team_id UUID REFERENCES teams(id);
+ALTER TABLE domains ADD COLUMN team_id UUID REFERENCES teams(id);
+ALTER TABLE inboxes ADD COLUMN team_id UUID REFERENCES teams(id);
+ALTER TABLE api_keys ADD COLUMN team_id UUID REFERENCES teams(id);
 ALTER TABLE static_projects ADD COLUMN team_id UUID REFERENCES teams(id);
 ALTER TABLE sent_email_logs ADD COLUMN team_id UUID REFERENCES teams(id);
+ALTER TABLE api_key_usage_logs ADD COLUMN team_id UUID REFERENCES teams(id);
+ALTER TABLE audit_logs ADD COLUMN team_id UUID REFERENCES teams(id);
 
--- Indexes
-CREATE INDEX idx_domains_team      ON domains(team_id)      WHERE deleted_at IS NULL AND team_id IS NOT NULL;
-CREATE INDEX idx_inboxes_team      ON inboxes(team_id)      WHERE deleted_at IS NULL AND team_id IS NOT NULL;
-CREATE INDEX idx_api_keys_team     ON api_keys(team_id)     WHERE deleted_at IS NULL AND team_id IS NOT NULL;
-CREATE INDEX idx_static_projects_team ON static_projects(team_id) WHERE deleted_at IS NULL AND team_id IS NOT NULL;
+CREATE INDEX idx_domains_team_active
+    ON domains(team_id)
+    WHERE deleted_at IS NULL AND team_id IS NOT NULL;
+
+CREATE INDEX idx_inboxes_team_active
+    ON inboxes(team_id)
+    WHERE deleted_at IS NULL AND team_id IS NOT NULL;
+
+CREATE INDEX idx_api_keys_team_active
+    ON api_keys(team_id)
+    WHERE deleted_at IS NULL AND team_id IS NOT NULL;
+
+CREATE INDEX idx_static_projects_team_active
+    ON static_projects(team_id)
+    WHERE deleted_at IS NULL AND team_id IS NOT NULL;
+
+CREATE INDEX idx_sent_email_logs_team
+    ON sent_email_logs(team_id)
+    WHERE team_id IS NOT NULL;
 ```
 
-**Rule:** A resource belongs to EITHER a user (`team_id IS NULL`) OR a team (`team_id IS NOT NULL`), never both.
+Keep global uniqueness where required by product behavior:
+
+- `domains.name` remains globally unique.
+- `inboxes.address` remains globally unique.
+- `static_projects.subdomain` remains globally unique.
+- API key hash remains globally unique.
 
 ### 1.3 GORM Models
 
-File: `internal/db/models.go` — add:
+Add `Team`, `TeamMember`, and `TeamInvite` to `internal/db/models.go`.
 
-```go
-type Team struct {
-    ID        uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
-    Name      string         `gorm:"not null" json:"name"`
-    OwnerID   uuid.UUID      `gorm:"type:uuid;index;not null" json:"owner_id"`
-    Owner     *User          `gorm:"foreignKey:OwnerID" json:"owner,omitempty"`
-    Members   []TeamMember   `gorm:"foreignKey:TeamID" json:"members,omitempty"`
-    CreatedAt time.Time      `json:"created_at"`
-    UpdatedAt time.Time      `json:"updated_at"`
-    DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
-}
+Important model details:
 
-type TeamMember struct {
-    ID        uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
-    TeamID    uuid.UUID      `gorm:"type:uuid;uniqueIndex:idx_team_user;not null" json:"team_id"`
-    UserID    uuid.UUID      `gorm:"type:uuid;uniqueIndex:idx_team_user;not null" json:"user_id"`
-    Role      string         `gorm:"not null;default:member" json:"role"` // owner | admin | member
-    JoinedAt  time.Time      `json:"joined_at"`
-    CreatedAt time.Time      `json:"created_at"`
-    UpdatedAt time.Time      `json:"updated_at"`
-    DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
-}
+- Add `BeforeCreate` hooks to assign UUIDs.
+- Use constants for team roles, invite statuses, and team permission scopes.
+- Store permissions as `datatypes.JSON`.
+- Do not define methods on `db.TeamMember` from another package. Permission methods must live in package `db`, or be plain functions in package `teams`.
 
-type TeamInvite struct {
-    ID        uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
-    TeamID    uuid.UUID  `gorm:"type:uuid;index;not null" json:"team_id"`
-    Team      *Team      `gorm:"foreignKey:TeamID" json:"team,omitempty"`
-    Email     string     `gorm:"not null" json:"email"`
-    Role      string     `gorm:"not null;default:member" json:"role"`
-    InviterID uuid.UUID  `gorm:"type:uuid;not null" json:"inviter_id"`
-    Status    string     `gorm:"not null;default:pending" json:"status"` // pending | accepted | declined
-    Token     string     `gorm:"uniqueIndex;not null" json:"token"`
-    ExpiresAt time.Time  `gorm:"not null" json:"expires_at"`
-    CreatedAt time.Time  `json:"created_at"`
-    UpdatedAt time.Time  `json:"updated_at"`
-}
-```
-
-Add to Domain, Inbox, ApiKey, StaticProject, SentEmailLog:
+Add to existing resource models:
 
 ```go
 TeamID *uuid.UUID `gorm:"type:uuid;index" json:"team_id,omitempty"`
 ```
 
----
+Required models:
 
-## Phase 2: Backend — Service Layer
+- `Domain`
+- `Inbox`
+- `ApiKey`
+- `StaticProject`
+- `SentEmailLog`
+- `ApiKeyUsageLog`
+- `AuditLog`
 
-### 2.1 File: `internal/teams/service.go`
+## Phase 2: Team Package
+
+Create `internal/teams`.
+
+### 2.1 Permissions
+
+File: `internal/teams/permissions.go`
 
 ```go
-package teams
+const (
+    RoleOwner  = "owner"
+    RoleAdmin  = "admin"
+    RoleMember = "member"
 
-type Service struct {
-    DB *gorm.DB
+    ScopeEmailAccess   = "email:access"
+    ScopeEmailManage   = "email:manage"
+    ScopeApiKeyRead    = "apikey:read"
+    ScopeApiKeyCreate  = "apikey:create"
+    ScopeApiKeyManage  = "apikey:manage"
+    ScopeWebsiteRead   = "website:read"
+    ScopeWebsiteDeploy = "website:deploy"
+    ScopeWebsiteManage = "website:manage"
+    ScopeDomainManage  = "domain:manage"
+    ScopeMemberManage  = "member:manage"
+    ScopeTeamDelete    = "team:delete"
+)
+```
+
+Helpers:
+
+- `DefaultScopes(role string) []string`
+- `ValidateRole(role string, allowOwner bool) error`
+- `ValidateScopes(scopes []string) error`
+- `MarshalScopes(scopes []string) datatypes.JSON`
+- `ParseScopes(raw datatypes.JSON) ([]string, error)`
+- `MemberHasScope(member db.TeamMember, scope string) bool`
+- `MemberHasAnyScope(member db.TeamMember, scopes ...string) bool`
+
+Owner always returns true for scope checks.
+
+### 2.2 Active Context
+
+File: `internal/teams/context.go`
+
+```go
+type ActiveContext struct {
+    UserID   uuid.UUID
+    TeamID   *uuid.UUID
+    Role     string
+    Scopes   []string
+    Personal bool
 }
-
-func NewService(db *gorm.DB) *Service { ... }
-
-// CreateTeam creates a team and adds creator as owner.
-func (s *Service) CreateTeam(userID uuid.UUID, name string) (*db.Team, error)
-
-// GetTeam returns team if user is a member.
-func (s *Service) GetTeam(userID, teamID uuid.UUID) (*db.Team, error)
-
-// ListTeams returns all teams the user belongs to.
-func (s *Service) ListTeams(userID uuid.UUID) ([]db.Team, error)
-
-// UpdateTeam (owner/admin only).
-func (s *Service) UpdateTeam(userID, teamID uuid.UUID, name string) error
-
-// DeleteTeam (owner only).
-func (s *Service) DeleteTeam(userID, teamID uuid.UUID) error
-
-// ListMembers returns members of a team.
-func (s *Service) ListMembers(userID, teamID uuid.UUID) ([]db.TeamMember, error)
-
-// ChangeMemberRole (owner/admin only, cannot change owner).
-func (s *Service) ChangeMemberRole(actorID, teamID, memberID uuid.UUID, role string) error
-
-// RemoveMember (owner/admin, or self-leave).
-func (s *Service) RemoveMember(actorID, teamID, memberID uuid.UUID) error
-
-// InviteMember sends invite email + creates TeamInvite record.
-func (s *Service) InviteMember(actorID, teamID uuid.UUID, email, role string) (*db.TeamInvite, error)
-
-// AcceptInvite accepts an invite via token, creates TeamMember.
-func (s *Service) AcceptInvite(userID uuid.UUID, token string) (*db.TeamMember, error)
-
-// DeclineInvite declines an invite.
-func (s *Service) DeclineInvite(userID uuid.UUID, token string) error
-
-// ListPendingInvites for a team (owner/admin only).
-func (s *Service) ListPendingInvites(userID, teamID uuid.UUID) ([]db.TeamInvite, error)
-
-// GetUserRole returns the role of user in team (or empty string if not member).
-func (s *Service) GetUserRole(userID, teamID uuid.UUID) string
 ```
 
-### 2.2 Authorization Helpers
+Helpers:
 
-File: `internal/teams/authz.go`
+- `FromGin(c *gin.Context) ActiveContext`
+- `SetGin(c *gin.Context, ctx ActiveContext)`
+- `TeamIDFromRequest(c *gin.Context) (*uuid.UUID, error)`
+
+Context rules:
+
+- Empty team id means personal context.
+- Invalid UUID returns `400 invalid_team_id`.
+- Unknown team or non-member returns `403 forbidden`.
+- Deleted team/member returns `403 forbidden`.
+
+### 2.3 Service
+
+File: `internal/teams/service.go`
+
+Core methods:
+
+- `CreateTeam(ctx context.Context, userID uuid.UUID, name string) (*db.Team, error)`
+- `GetTeam(ctx context.Context, userID, teamID uuid.UUID) (*db.Team, error)`
+- `ListTeams(ctx context.Context, userID uuid.UUID) ([]TeamSummary, error)`
+- `UpdateTeam(ctx context.Context, actorID, teamID uuid.UUID, name string) error`
+- `DeleteTeam(ctx context.Context, actorID, teamID uuid.UUID) error`
+- `ListMembers(ctx context.Context, actorID, teamID uuid.UUID) ([]TeamMemberView, error)`
+- `UpdateMember(ctx context.Context, actorID, teamID, memberUserID uuid.UUID, role *string, scopes *[]string) error`
+- `RemoveMember(ctx context.Context, actorID, teamID, memberUserID uuid.UUID) error`
+- `InviteMember(ctx context.Context, actorID, teamID uuid.UUID, email, role string, scopes []string) (*InviteCreated, error)`
+- `GetInviteInfo(ctx context.Context, token string) (*InviteInfo, error)`
+- `AcceptInvite(ctx context.Context, userID uuid.UUID, token string) (*db.TeamMember, error)`
+- `DeclineInvite(ctx context.Context, userID uuid.UUID, token string) error`
+- `CancelInvite(ctx context.Context, actorID, teamID, inviteID uuid.UUID) error`
+- `ListPendingInvites(ctx context.Context, actorID, teamID uuid.UUID) ([]InviteInfo, error)`
+- `GetMember(ctx context.Context, teamID, userID uuid.UUID) (*db.TeamMember, error)`
+
+Transactional requirements:
+
+- `CreateTeam` inserts team and owner membership in one transaction.
+- `AcceptInvite` checks token hash, status, expiry, invite email, existing member, and inserts membership plus updates invite status in one transaction.
+- `DeleteTeam` soft-deletes team and active members in one transaction.
+- Owner cannot leave, be removed, or be demoted unless ownership transfer is implemented first.
+
+## Phase 3: Middleware
+
+### 3.1 Auth Context Enrichment
+
+Update `internal/http/middleware/auth.go` only enough to keep auth focused:
+
+- Authenticate user as today.
+- Optionally attach user to gin context as today.
+
+Do not make auth middleware import handlers. Either:
+
+- Create a separate `teams.RequireContext(teamSvc)` middleware after auth, or
+- Add a small middleware package function that depends on `internal/teams`.
+
+Recommended route wiring:
 
 ```go
-// CanManageTeam returns true if user is owner or admin of the team.
-func CanManageTeam(role string) bool { return role == "owner" || role == "admin" }
-
-// CanOwnTeam returns true if user is the owner.
-func CanOwnTeam(role string) bool { return role == "owner" }
-
-// RequireTeamRole is middleware factory — checks user belongs to team with required role.
-func RequireTeamRole(svc *Service, teamIDParam string, roles ...string) gin.HandlerFunc
+protected := api.Group("")
+protected.Use(mw.Auth(a.Auth, a.DB))
+protected.Use(teamsmw.RequireContext(a.Teams))
 ```
 
----
+### 3.2 Scope Middleware
 
-## Phase 3: Backend — API Endpoints
+File: `internal/http/middleware/team_scope.go` or `internal/teams/middleware.go`.
 
-### 3.1 Routes (in `app.go` Router)
+```go
+func RequireTeamScope(scope string) gin.HandlerFunc
+```
+
+Behavior:
+
+- Personal context passes. Existing personal ownership checks still apply.
+- Team context requires the member to have the scope.
+- Missing scope returns `403` with code `missing_scope`.
+
+Use this on team-aware resource routes:
+
+- domain create/verify/delete: `domain:manage`
+- inbox create/update/delete: `email:manage`
+- inbox/email list/read/reply/download: `email:access`
+- API key list/get/settings: `apikey:read`
+- API key create: `apikey:create`
+- API key patch/revoke/delete/usage: `apikey:manage`
+- static project list/get: `website:read`
+- static project deploy/create: `website:deploy`
+- static project delete/domain/SSL actions: `website:manage`
+
+## Phase 4: API Endpoints
+
+### 4.1 Team Routes
+
+Add `Teams *teams.Service` to `handlers.App`.
+
+Wire in `App.Router()`:
 
 ```go
 teamsGroup := protected.Group("/teams")
@@ -207,173 +338,271 @@ teamsGroup.PATCH("/:id", a.updateTeam)
 teamsGroup.DELETE("/:id", a.deleteTeam)
 
 teamsGroup.GET("/:id/members", a.listMembers)
-teamsGroup.PATCH("/:id/members/:memberId", a.updateMember)
-teamsGroup.DELETE("/:id/members/:memberId", a.removeMember)
+teamsGroup.PATCH("/:id/members/:memberUserId", a.updateMember)
+teamsGroup.DELETE("/:id/members/:memberUserId", a.removeMember)
 
 teamsGroup.POST("/:id/invites", a.inviteMember)
 teamsGroup.GET("/:id/invites", a.listInvites)
 teamsGroup.DELETE("/:id/invites/:inviteId", a.cancelInvite)
+
+api.GET("/team-invites/:token", a.getInviteInfo)
+protected.POST("/team-invites/:token/accept", a.acceptInvite)
+protected.POST("/team-invites/:token/decline", a.declineInvite)
 ```
 
-Public endpoints (no auth needed to accept):
+Accept and decline require auth. The service must require `current_user.email == invite.email`.
 
-```go
-api.GET("/team-invites/:token", a.getInviteInfo)      // preview invite
-api.POST("/team-invites/:token/accept", a.acceptInvite) // accept (requires auth)
-api.POST("/team-invites/:token/decline", a.declineInvite)
+### 4.2 Invite Registration Flow
+
+Current registration creates inactive users, and login rejects inactive users. Team invites need one explicit rule.
+
+Recommended first implementation:
+
+- Add `POST /api/team-invites/:token/register`.
+- It validates token and invite email.
+- It creates the user as active.
+- It accepts the invite in the same transaction or immediately after user creation.
+- It returns access and refresh tokens.
+
+Existing-user flow:
+
+1. Preview invite with `GET /api/team-invites/:token`.
+2. Login normally.
+3. Accept invite with Bearer token.
+
+New-user flow:
+
+1. Preview invite.
+2. Submit name and password to invite-register endpoint.
+3. Backend creates active user, accepts invite, returns tokens.
+
+Avoid frontend logic that tries login, then blind register on `401`. It creates ambiguous errors and conflicts with inactive-account behavior.
+
+## Phase 5: Resource Scoping
+
+### 5.1 Shared Query Helpers
+
+Before editing individual handlers, add helpers so every feature scopes resources consistently.
+
+Recommended helpers:
+
+- `ScopeDomains(q *gorm.DB, ctx teams.ActiveContext) *gorm.DB`
+- `ScopeInboxes(q *gorm.DB, ctx teams.ActiveContext) *gorm.DB`
+- `ScopeApiKeys(q *gorm.DB, ctx teams.ActiveContext) *gorm.DB`
+- `ScopeStaticProjects(q *gorm.DB, ctx teams.ActiveContext) *gorm.DB`
+- `ScopeSentEmailLogs(q *gorm.DB, ctx teams.ActiveContext) *gorm.DB`
+
+Personal context:
+
+```sql
+user_id = ? AND team_id IS NULL
 ```
 
-### 3.2 Handlers
+Team context:
 
-File: `internal/http/handlers/teams.go`
-
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| POST | `/api/teams` | Bearer | Create team (creator becomes owner) |
-| GET | `/api/teams` | Bearer | List my teams |
-| GET | `/api/teams/:id` | Bearer + member | Get team detail |
-| PATCH | `/api/teams/:id` | Bearer + admin | Update team name |
-| DELETE | `/api/teams/:id` | Bearer + owner | Delete team |
-| GET | `/api/teams/:id/members` | Bearer + member | List members |
-| PATCH | `/api/teams/:id/members/:mid` | Bearer + admin | Change role |
-| DELETE | `/api/teams/:id/members/:mid` | Bearer + admin/self | Remove member |
-| POST | `/api/teams/:id/invites` | Bearer + admin | Invite user |
-| GET | `/api/teams/:id/invites` | Bearer + admin | List pending invites |
-| DELETE | `/api/teams/:id/invites/:iid` | Bearer + admin | Cancel invite |
-| GET | `/api/team-invites/:token` | Public | Preview invite info |
-| POST | `/api/team-invites/:token/accept` | Bearer | Accept invite |
-| POST | `/api/team-invites/:token/decline` | Bearer | Decline invite |
-
----
-
-## Phase 4: Resource Ownership Changes
-
-### 4.1 Context Enrichment
-
-Add to auth middleware (`internal/http/middleware/auth.go`):
-
-```go
-// After extracting current user, also attach their team context
-c.Set("team_id", getTeamIDFromRequest(c))
-c.Set("team_role", getTeamRole(c))
+```sql
+team_id = ?
 ```
 
-### 4.2 Query Scoping
+### 5.2 HTTP Handlers
 
-All list/create handlers for Domain, Inbox, ApiKey, StaticProject need to support `team_id`:
+Update these areas:
+
+- Domains in `internal/http/handlers/app.go`
+- Domain email auth in `internal/http/handlers/domain_email_auth.go`
+- Inboxes and emails in `internal/http/handlers/app.go`
+- Sent/reply/conversation queries in `internal/http/handlers/app.go`
+- API keys in `internal/http/handlers/apikey.go`
+- Static project handlers in `internal/http/handlers/static_projects.go`
+
+When creating team resources:
+
+- Set `TeamID`.
+- Keep `UserID` as creator or quota anchor.
+- Validate required team scope before creation.
+- Count quotas against the team owner for first implementation.
+
+### 5.3 Static Projects Service
+
+`internal/staticprojects.Service` currently accepts `userID`. Introduce a context parameter or a small ownership struct:
 
 ```go
-// Before (single user):
-db.Where("user_id = ?", user.ID).Find(&domains)
-
-// After (user or team):
-if teamID := c.GetString("team_id"); teamID != "" {
-    db.Where("team_id = ?", teamID).Find(&domains)
-} else {
-    db.Where("user_id = ? AND team_id IS NULL", user.ID).Find(&domains)
+type OwnerContext struct {
+    UserID uuid.UUID
+    TeamID *uuid.UUID
 }
 ```
 
-### 4.3 Create with Team
+Update list/get/create/delete/domain assignment methods to scope by `team_id` when present.
 
-When creating a resource, accept optional `team_id`:
+Domain assignment must require the domain to be available in the same context:
 
-```json
-POST /api/domains
-{
-    "name": "mycompany.com",
-    "team_id": "uuid-here"   // optional
-}
+- Personal project can bind only personal verified domains.
+- Team project can bind only team verified domains.
+
+### 5.4 API Keys and SMTP Relay
+
+Team-owned API keys must carry `team_id`.
+
+Update:
+
+- `internal/http/middleware/apikey_auth.go`
+- `internal/http/handlers/apikey.go`
+- SMTP AUTH path in `internal/smtp/server`
+- Outbound sender in `internal/smtp/relay`
+- Send logs and usage logs
+
+Rules:
+
+- API key auth sets both user id and optional team id in context.
+- Outbound domain lookup uses:
+  - personal key: `domains.user_id = ? AND domains.team_id IS NULL`
+  - team key: `domains.team_id = ?`
+- `sent_email_logs.team_id` is set for team keys.
+- Rate limit counters stay per API key. Team-shared keys naturally share the same key counters.
+
+### 5.5 Realtime Events
+
+Inbound email currently publishes by `UserID`. Team inboxes need team fanout.
+
+First implementation:
+
+- Add optional `TeamID` to `realtime.Event`.
+- For personal inboxes, publish to user channel as today.
+- For team inboxes, publish to team channel.
+- SSE subscribes to current user's personal channel plus team channels for teams where the user has `email:access`.
+
+If broad fanout is simpler initially, publish the event to all active team members with `email:access`, but keep the event payload carrying `team_id`.
+
+## Phase 6: Frontend
+
+### 6.1 Team Switcher
+
+Add a context switcher in the existing app shell:
+
+```text
+Personal
+MyCompany Team
++ Create Team
 ```
 
-Validate that the user belongs to the team and has at least `admin` role before allowing team-scoped creation.
+Behavior:
 
-### 4.4 Quota Checks
+- Store active team id in app state and localStorage.
+- Send `X-Team-Id` on API calls when active team is selected.
+- Reload domains, inboxes, emails, API keys, dashboard, and static projects after switching.
+- Hide actions when the active member lacks the required scope.
 
-Team resources count against the team owner's quota (simplest approach). Or introduce `max_team_domains`, `max_team_inboxes` on User model.
+### 6.2 Team Management
 
----
+Add `web/teams.js` for:
 
-## Phase 5: Frontend
+- Team list
+- Team detail
+- Members table
+- Pending invites
+- Invite modal
+- Role and permission editor
 
-### 5.1 Team Switcher
+Add styles to `web/styles.css` using the existing dashboard visual language.
 
-In sidebar/topbar, show current context:
+### 6.3 Invite Join Page
 
-```
-[GoMail]  ▼ MyCompany Team
-          ──────────────
-          Personal
-          MyCompany Team
-          ──────────────
-          + Create Team
-```
+Add:
 
-When "Personal" is selected → show user's own resources. When a team is selected → show team resources.
+- `web/join.html`
+- `web/join.js`
 
-### 5.2 Team Management Page
+Flow:
 
-New page `/app/` section or new route:
+1. Read token from query string.
+2. `GET /api/team-invites/:token`.
+3. If already logged in, show accept button.
+4. If not logged in, show tabs for login and create account.
+5. Existing account: login then accept.
+6. New account: call invite-register endpoint.
+7. Store returned tokens and redirect to `/app/` with the joined team active.
 
-- **Team list** — cards with team name, member count, my role
-- **Team detail** — members table (avatar, email, role, actions), pending invites, team settings
-- **Invite modal** — email input + role dropdown → send invite
-- **Accept invite** — from email link or notification badge
+Do not auto-register after a failed login without showing the user what happened.
 
-### 5.3 UI Files
-
-| File | Purpose |
-|---|---|
-| `web/teams.js` | Team API calls, list/detail rendering |
-| `web/main.js` | Team switcher in sidebar, context switching |
-| `web/styles.css` | Team cards, member table, invite badges |
-
-### 5.4 Context Switching Behavior
-
-When user switches team context:
-1. `state.activeTeamId` is set
-2. All API calls include `?team_id=xxx` or `X-Team-Id` header
-3. Domain, Inbox, API Key, Project lists reload with team scope
-4. Sidebar shows team name instead of "Personal"
-
----
-
-## Phase 6: Edge Cases & Polish
+## Phase 7: Edge Cases
 
 | Case | Handling |
 |---|---|
-| Owner leaves team | Must transfer ownership or delete team first |
-| Delete team | Soft-delete team + cascade soft-delete all team members. Resources with `team_id` become orphaned (or reassign to owner) |
-| User deleted from system | Cascade remove from all teams |
-| Invite expired | Cron or on-access check `expires_at < now()` → mark `expired` |
-| Duplicate invite | Upsert or reject if pending invite exists for same email+team |
-| Cross-team resource access | Middleware rejects unless user is member of the resource's team |
-| Rate limiting | Team-shared API keys share rate limit counters |
-| Audit log | `DomainEvent` already exists — extend to log team_id and actor_id |
+| Owner leaves team | Reject until ownership transfer exists |
+| Owner permissions | Always all scopes |
+| Owner demotion/removal | Reject |
+| Admin demoted to member | Reset to member default scopes unless request includes explicit scopes |
+| Missing scope | `403` code `missing_scope`, include required scope |
+| Invalid team id | `400` code `invalid_team_id` |
+| Non-member team id | `403` code `forbidden` |
+| Duplicate invite | Reject pending duplicate for same lower(email)+team |
+| Expired invite | Mark expired on read/accept and reject |
+| Invite email mismatch | Reject accept/register |
+| Team deletion | Soft-delete team and memberships; leave resources retained with `team_id` for audit/export |
+| User deletion | Soft-delete memberships and invites by email where appropriate |
+| Cross-context resource access | Always scope by active context, never by id alone |
+| Domain uniqueness | Keep global uniqueness |
+| Static project custom domain | Project and domain must be in same context |
+| Audit log | Include actor user id and team id |
 
----
+## Phase 8: Tests
+
+Add tests before frontend polish.
+
+### Unit Tests
+
+- Permission default scopes and validation
+- `MemberHasScope`
+- Invite token hashing and expiry
+- Service role restrictions
+- Active context parsing and membership rejection
+
+### Integration Tests
+
+- Create team creates owner member
+- Admin can invite; member cannot invite without scope
+- Existing user accepts invite only for matching email
+- New user invite registration creates active account and member
+- Team member can list team inboxes with `email:access`
+- Member without `email:manage` cannot create inbox
+- Team API key can send only from team verified domains
+- Personal context cannot see team resources
+- Team context cannot see personal resources
+- Static project can bind only same-context verified domain
+- SSE receives team email events for members with `email:access`
 
 ## Implementation Order
 
-1. **DB migration** (new tables + alter existing) 
-2. **GORM models** in `internal/db/models.go`
-3. **Service layer** `internal/teams/service.go` + `authz.go`
-4. **Handlers** `internal/http/handlers/teams.go`
-5. **Wire routes** in `app.go`
-6. **Middleware update** — team context in auth
-7. **Resource handler updates** — domain, inbox, apikey, projects support team_id
-8. **Frontend** — team switcher, management page, invite flow
-9. **Tests**
-10. **Deploy**
+1. Add migration and GORM models.
+2. Add `internal/teams` permissions, context, and service.
+3. Add middleware for validated active context and scope checks.
+4. Add team handlers and routes.
+5. Add invite preview, accept, decline, and invite-register flow.
+6. Add shared resource scoping helpers.
+7. Update domain, inbox, email, sent/reply, and dashboard handlers.
+8. Update domain email auth handlers.
+9. Update API key handlers, API key auth, SMTP AUTH, relay, logs.
+10. Update static project handlers and service.
+11. Update realtime event model and SSE subscriptions.
+12. Add frontend team switcher and team management.
+13. Add invite join page.
+14. Add tests and run `make check`.
 
 ## Estimated Effort
 
-| Phase | Hours |
-|---|---|
-| DB + Models | 2-3 |
-| Service Layer | 3-4 |
-| API Handlers | 4-5 |
-| Resource Handler Updates | 3-4 |
-| Frontend | 6-8 |
-| Tests | 2-3 |
-| **Total** | **20-27h** (~3-4 days) |
+| Area | Hours |
+|---|---:|
+| DB + models | 3-4 |
+| Team service + permissions | 6-8 |
+| Middleware + context | 3-4 |
+| Team handlers + invite flow | 6-8 |
+| Resource handler scoping | 8-12 |
+| API key + SMTP relay updates | 5-8 |
+| Static projects updates | 4-6 |
+| Realtime updates | 3-5 |
+| Frontend | 8-12 |
+| Tests | 6-10 |
+| Total | 52-77 |
+
+The higher estimate reflects the real blast radius: teams touch HTTP authorization, SMTP relay, realtime events, static projects, and existing single-user assumptions.

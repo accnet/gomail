@@ -25,10 +25,10 @@ func newTestService(t *testing.T, db *gorm.DB, cfg *config.Config) *Service {
 	t.Helper()
 	if cfg == nil {
 		cfg = &config.Config{
-			StaticSitesRoot:            t.TempDir(),
-			StaticSitesMaxArchiveBytes: 1024 * 1024,
+			StaticSitesRoot:              t.TempDir(),
+			StaticSitesMaxArchiveBytes:   1024 * 1024,
 			StaticSitesMaxExtractedBytes: 1024 * 1024,
-			StaticSitesMaxFileCount:    100,
+			StaticSitesMaxFileCount:      100,
 		}
 	}
 	storageMgr := storage.NewStaticSitesManager(cfg.StaticSitesRoot)
@@ -429,6 +429,7 @@ func TestDomainAssignmentAndActiveSSL(t *testing.T) {
 	otherUserID := uuid.New()
 	projectID := uuid.New()
 	verifiedID := uuid.New()
+	saasDomainID := uuid.New()
 	pendingID := uuid.New()
 	otherDomainID := uuid.New()
 	confDir := t.TempDir()
@@ -437,6 +438,7 @@ func TestDomainAssignmentAndActiveSSL(t *testing.T) {
 		&db.User{ID: userID, Email: "owner@example.com", MaxWebsites: 2},
 		&db.User{ID: otherUserID, Email: "other@example.com", MaxWebsites: 2},
 		&db.Domain{ID: verifiedID, UserID: userID, Name: "site.example.com", Status: "verified"},
+		&db.Domain{ID: saasDomainID, UserID: userID, Name: "example.com", Status: "verified"},
 		&db.Domain{ID: pendingID, UserID: userID, Name: "pending.example.com", Status: "pending"},
 		&db.Domain{ID: otherDomainID, UserID: otherUserID, Name: "other.example.com", Status: "verified"},
 		&db.StaticProject{ID: projectID, UserID: userID, Name: "Site", Subdomain: "site", Status: "published", IsActive: true},
@@ -451,6 +453,7 @@ func TestDomainAssignmentAndActiveSSL(t *testing.T) {
 		StaticSitesRoot:       t.TempDir(),
 		TraefikDynamicConfDir: confDir,
 		StaticServerAddr:      ":8090",
+		SaaSDomain:            "example.com",
 	}
 	svc := newTestService(t, database, cfg)
 
@@ -467,6 +470,9 @@ func TestDomainAssignmentAndActiveSSL(t *testing.T) {
 	}
 	if _, err := svc.AssignDomain(userID, projectID, otherDomainID); err != ErrDomainNotVerified {
 		t.Fatalf("AssignDomain other owner error = %v, want ErrDomainNotVerified", err)
+	}
+	if _, err := svc.AssignDomain(userID, projectID, saasDomainID); err != ErrDomainReserved {
+		t.Fatalf("AssignDomain saas domain error = %v, want ErrDomainReserved", err)
 	}
 
 	project, err := svc.AssignDomain(userID, projectID, verifiedID)

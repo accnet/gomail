@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GoMail — Teams</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <script>
+      (function() {
+        const theme = localStorage.getItem("theme") || "light";
+        document.documentElement.setAttribute("data-theme", theme);
+        if (!localStorage.getItem("access_token")) {
+          window.location.href = "/app/login.html";
+        }
+      })();
+    </script>
+    <link rel="stylesheet" href="/app/styles.css" />
+  </head>
+  <body style="background:var(--color-bg);min-height:100vh;padding:24px">
+    <div class="teams-page" id="teams-root"></div>
+
+    <!-- Modal Overlay -->
+    <div id="modal-overlay" class="modal-overlay hidden">
+      <div class="modal">
+        <div class="modal-header">
+          <h3 id="modal-title" class="modal-title"></h3>
+          <button id="modal-close" class="modal-close">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+        <div id="modal-body" class="modal-body"></div>
+      </div>
+    </div>
+
+    <script src="/app/teams.js"></script>
+  </body>
+</html>

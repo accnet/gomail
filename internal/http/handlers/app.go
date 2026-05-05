@@ -22,6 +22,7 @@ import (
 	mw "gomail/internal/http/middleware"
 	"gomail/internal/mail/outbound"
 	"gomail/internal/realtime"
+	"gomail/internal/teams"
 	"gomail/pkg/response"
 
 	"github.com/gin-gonic/gin"
@@ -33,6 +34,7 @@ import (
 type App struct {
 	DB                   *gorm.DB
 	Auth                 *auth.Service
+	Teams                *teams.Service
 	Config               config.Config
 	Redis                *redis.Client
 	Verifier             dns.Verifier
@@ -44,12 +46,14 @@ type App struct {
 }
 
 func (a App) Router() *gin.Engine {
+	if a.Teams == nil && a.DB != nil {
+		a.Teams = teams.NewService(a.DB)
+	}
 	r := gin.New()
 	r.Use(gin.Recovery(), requestID())
 
-	// Static site middleware: check if the SaaS domain has a static project bound.
-	// Must run before the web app static handler so it can intercept and serve the
-	// static site instead of the login page.
+	// Static site middleware handles the exact SaaS/root domain before the web app
+	// static handler so it can redirect to the app or serve the landing folder.
 	if a.StaticSiteMiddleware != nil {
 		r.Use(a.StaticSiteMiddleware.Handler())
 	}
@@ -74,6 +78,7 @@ func (a App) Router() *gin.Engine {
 
 	protected := api.Group("")
 	protected.Use(mw.Auth(a.Auth, a.DB))
+	protected.Use(mw.RequireTeamContext(a.Teams))
 	protected.GET("/me", a.me)
 	protected.POST("/auth/logout", a.logout)
 	protected.POST("/auth/change-password", a.changePassword)
@@ -103,6 +108,8 @@ func (a App) Router() *gin.Engine {
 	protected.GET("/emails/:id/attachments/:attachmentId/download", a.downloadAttachment)
 	protected.GET("/dashboard", a.dashboard)
 	protected.GET("/outbound/status", a.outboundStatus)
+	protected.GET("/settings/general", a.getGeneralSettings)
+	protected.PATCH("/settings/general", a.patchGeneralSettings)
 
 	// API key management (SMTP relay / submission)
 	RegisterApiKeyRoutes(protected, a.DB, mw.Auth(a.Auth, a.DB), a.Config.SMTPAuthHostname, a.Config.SMTPAuthPort, a.Config.SMTPAuthTLSPort)
@@ -112,6 +119,26 @@ func (a App) Router() *gin.Engine {
 	RegisterTestSendRoute(apiKeyGroup, a.DB, mw.ApiKeyAuth(a.DB), a.SendEmail)
 
 	api.GET("/events/stream", mw.AuthWithQueryToken(a.Auth, a.DB), a.events)
+
+	// Team management routes
+	tg := protected.Group("/teams")
+	tg.POST("", a.createTeam)
+	tg.GET("", a.listTeams)
+	tg.GET("/:id", a.getTeam)
+	tg.PATCH("/:id", a.updateTeam)
+	tg.DELETE("/:id", a.deleteTeam)
+	tg.GET("/:id/members", a.listMembers)
+	tg.PATCH("/:id/members/:userId", a.updateMember)
+	tg.DELETE("/:id/members/:userId", a.removeMember)
+	tg.POST("/:id/invites", a.inviteMember)
+	tg.GET("/:id/invites", a.listInvites)
+	tg.DELETE("/:id/invites/:inviteId", a.cancelInvite)
+
+	// Invite public preview + registration (no auth needed for preview/register)
+	api.GET("/team-invites/:token", a.getInviteInfo)
+	api.POST("/team-invites/:token/register", a.inviteRegister)
+	protected.POST("/team-invites/:token/accept", a.acceptInvite)
+	protected.POST("/team-invites/:token/decline", a.declineInvite)
 
 	admin := protected.Group("/admin")
 	admin.Use(mw.Admin())
@@ -155,13 +182,17 @@ func (a App) register(c *gin.Context) {
 		response.Error(c, http.StatusInternalServerError, "hash_failed", "could not hash password")
 		return
 	}
-	user := db.User{Email: strings.ToLower(req.Email), Name: req.Name, PasswordHash: hash, IsActive: false, MaxDomains: 5, MaxInboxes: 50, MaxAttachmentSizeMB: 25, MaxMessageSizeMB: 25, MaxStorageBytes: 10 * 1024 * 1024 * 1024}
+	user := db.User{Email: strings.ToLower(req.Email), Name: req.Name, PasswordHash: hash, IsActive: false, MaxDomains: 5, MaxInboxes: 50, MaxMembers: 5, MaxAttachmentSizeMB: 25, MaxMessageSizeMB: 25, MaxStorageBytes: 10 * 1024 * 1024 * 1024}
 	if err := a.DB.Create(&user).Error; err != nil {
 		if isDuplicateKeyError(err) {
 			response.Error(c, http.StatusConflict, "email_exists", "email already exists")
 		} else {
 			response.Error(c, http.StatusInternalServerError, "registration_failed", "could not create account")
 		}
+		return
+	}
+	if _, err := a.Teams.EnsureDefaultWorkspace(c.Request.Context(), user); err != nil {
+		response.Error(c, http.StatusInternalServerError, "workspace_failed", "could not create default workspace")
 		return
 	}
 	response.Created(c, user)
@@ -251,9 +282,11 @@ func (a App) changePassword(c *gin.Context) {
 }
 
 func (a App) listDomains(c *gin.Context) {
-	user := mw.CurrentUser(c)
+	ctx := teams.FromGin(c)
 	var rows []db.Domain
-	a.DB.Where("user_id = ?", user.ID).Order("created_at desc").Find(&rows)
+	q := a.DB.Model(&db.Domain{})
+	q = ScopeDomains(q, ctx)
+	q.Order("created_at desc").Find(&rows)
 	items := make([]domainListItem, 0, len(rows))
 	for _, row := range rows {
 		authRow, _ := loadOptionalDomainEmailAuth(a.DB, row.ID)
@@ -263,19 +296,30 @@ func (a App) listDomains(c *gin.Context) {
 }
 
 func (a App) createDomain(c *gin.Context) {
+	ctx := teams.FromGin(c)
 	user := mw.CurrentUser(c)
 	var req struct{ Name string }
 	if !bind(c, &req) {
 		return
 	}
+	// Quota: count domains in current context
 	var count int64
-	a.DB.Model(&db.Domain{}).Where("user_id = ?", user.ID).Count(&count)
+	q := a.DB.Model(&db.Domain{})
+	q = ScopeDomains(q, ctx)
+	q.Count(&count)
 	if int(count) >= user.MaxDomains {
 		response.Error(c, http.StatusForbidden, "quota_exceeded", "domain quota exceeded")
 		return
 	}
 	name := strings.ToLower(strings.TrimSpace(req.Name))
-	row := db.Domain{UserID: user.ID, Name: name, Status: "pending", VerificationMethod: "mx", MXTarget: a.Config.MXTarget}
+	row := db.Domain{
+		UserID:             ShouldSetUserID(ctx),
+		TeamID:             ShouldSetTeamID(ctx),
+		Name:               name,
+		Status:             "pending",
+		VerificationMethod: "mx",
+		MXTarget:           a.Config.MXTarget,
+	}
 	if err := a.DB.Create(&row).Error; err != nil {
 		response.Error(c, http.StatusConflict, "domain_exists", "domain already claimed")
 		return
@@ -284,9 +328,9 @@ func (a App) createDomain(c *gin.Context) {
 }
 
 func (a App) getDomain(c *gin.Context) {
-	user := mw.CurrentUser(c)
+	ctx := teams.FromGin(c)
 	var row db.Domain
-	if ownerFirst(a.DB, c.Param("id"), user.ID, &row) != nil {
+	if err := ownerOrTeamFirst(a.DB, c.Param("id"), ctx, &row); err != nil {
 		response.Error(c, http.StatusNotFound, "not_found", "domain not found")
 		return
 	}
@@ -294,9 +338,10 @@ func (a App) getDomain(c *gin.Context) {
 }
 
 func (a App) verifyDomain(c *gin.Context) {
+	ctx := teams.FromGin(c)
 	user := mw.CurrentUser(c)
 	var row db.Domain
-	if ownerFirst(a.DB, c.Param("id"), user.ID, &row) != nil {
+	if err := ownerOrTeamFirst(a.DB, c.Param("id"), ctx, &row); err != nil {
 		response.Error(c, http.StatusNotFound, "not_found", "domain not found")
 		return
 	}
@@ -327,9 +372,9 @@ func (a App) verifyDomain(c *gin.Context) {
 }
 
 func (a App) verifyDomainA(c *gin.Context) {
-	user := mw.CurrentUser(c)
+	ctx := teams.FromGin(c)
 	var row db.Domain
-	if ownerFirst(a.DB, c.Param("id"), user.ID, &row) != nil {
+	if err := ownerOrTeamFirst(a.DB, c.Param("id"), ctx, &row); err != nil {
 		response.Error(c, http.StatusNotFound, "not_found", "domain not found")
 		return
 	}
@@ -350,9 +395,9 @@ func (a App) verifyDomainA(c *gin.Context) {
 }
 
 func (a App) verifyDomainMX(c *gin.Context) {
-	user := mw.CurrentUser(c)
+	ctx := teams.FromGin(c)
 	var row db.Domain
-	if ownerFirst(a.DB, c.Param("id"), user.ID, &row) != nil {
+	if err := ownerOrTeamFirst(a.DB, c.Param("id"), ctx, &row); err != nil {
 		response.Error(c, http.StatusNotFound, "not_found", "domain not found")
 		return
 	}
@@ -419,19 +464,24 @@ func mustLoadOptionalDomainEmailAuth(database *gorm.DB, domainID uuid.UUID) *db.
 }
 
 func (a App) deleteDomain(c *gin.Context) {
-	user := mw.CurrentUser(c)
-	a.DB.Where("id = ? AND user_id = ?", c.Param("id"), user.ID).Delete(&db.Domain{})
+	ctx := teams.FromGin(c)
+	q := a.DB.Where("id = ?", c.Param("id"))
+	q = ScopeDomains(q, ctx)
+	q.Delete(&db.Domain{})
 	response.OK(c, gin.H{"ok": true})
 }
 
 func (a App) listInboxes(c *gin.Context) {
-	user := mw.CurrentUser(c)
+	ctx := teams.FromGin(c)
 	var rows []db.Inbox
-	a.DB.Where("user_id = ?", user.ID).Order("created_at desc").Find(&rows)
+	q := a.DB.Model(&db.Inbox{})
+	q = ScopeInboxes(q, ctx)
+	q.Order("created_at desc").Find(&rows)
 	response.OK(c, rows)
 }
 
 func (a App) createInbox(c *gin.Context) {
+	ctx := teams.FromGin(c)
 	user := mw.CurrentUser(c)
 	var req struct {
 		DomainID  uuid.UUID `json:"domain_id"`
@@ -441,13 +491,18 @@ func (a App) createInbox(c *gin.Context) {
 		return
 	}
 	var count int64
-	a.DB.Model(&db.Inbox{}).Where("user_id = ?", user.ID).Count(&count)
+	q := a.DB.Model(&db.Inbox{})
+	q = ScopeInboxes(q, ctx)
+	q.Count(&count)
 	if int(count) >= user.MaxInboxes {
 		response.Error(c, http.StatusForbidden, "quota_exceeded", "inbox quota exceeded")
 		return
 	}
+	// Find domain in current context
 	var domain db.Domain
-	if err := a.DB.Where("id = ? AND user_id = ? AND status = ?", req.DomainID, user.ID, "verified").First(&domain).Error; err != nil {
+	domainQ := a.DB.Where("id = ? AND status = ?", req.DomainID, "verified")
+	domainQ = ScopeDomains(domainQ, ctx)
+	if err := domainQ.First(&domain).Error; err != nil {
 		response.Error(c, http.StatusBadRequest, "domain_not_verified", "domain must be verified")
 		return
 	}
@@ -456,7 +511,14 @@ func (a App) createInbox(c *gin.Context) {
 		response.Error(c, http.StatusBadRequest, "invalid_local_part", "invalid local part")
 		return
 	}
-	row := db.Inbox{UserID: user.ID, DomainID: domain.ID, LocalPart: local, Address: local + "@" + domain.Name, IsActive: true}
+	row := db.Inbox{
+		UserID:    ShouldSetUserID(ctx),
+		TeamID:    ShouldSetTeamID(ctx),
+		DomainID:  domain.ID,
+		LocalPart: local,
+		Address:   local + "@" + domain.Name,
+		IsActive:  true,
+	}
 	if err := a.DB.Create(&row).Error; err != nil {
 		response.Error(c, http.StatusConflict, "inbox_exists", "inbox already exists")
 		return
@@ -465,7 +527,7 @@ func (a App) createInbox(c *gin.Context) {
 }
 
 func (a App) patchInbox(c *gin.Context) {
-	user := mw.CurrentUser(c)
+	ctx := teams.FromGin(c)
 	var req struct {
 		IsActive *bool `json:"is_active"`
 	}
@@ -476,19 +538,24 @@ func (a App) patchInbox(c *gin.Context) {
 	if req.IsActive != nil {
 		updates["is_active"] = *req.IsActive
 	}
-	a.DB.Model(&db.Inbox{}).Where("id = ? AND user_id = ?", c.Param("id"), user.ID).Updates(updates)
+	q := a.DB.Model(&db.Inbox{}).Where("id = ?", c.Param("id"))
+	q = ScopeInboxes(q, ctx)
+	q.Updates(updates)
 	response.OK(c, gin.H{"ok": true})
 }
 
 func (a App) deleteInbox(c *gin.Context) {
-	user := mw.CurrentUser(c)
-	a.DB.Where("id = ? AND user_id = ?", c.Param("id"), user.ID).Delete(&db.Inbox{})
+	ctx := teams.FromGin(c)
+	q := a.DB.Where("id = ?", c.Param("id"))
+	q = ScopeInboxes(q, ctx)
+	q.Delete(&db.Inbox{})
 	response.OK(c, gin.H{"ok": true})
 }
 
 func (a App) listEmails(c *gin.Context) {
-	user := mw.CurrentUser(c)
-	q := a.DB.Joins("JOIN inboxes ON inboxes.id = emails.inbox_id").Where("inboxes.user_id = ?", user.ID)
+	ctx := teams.FromGin(c)
+	q := a.DB.Joins("JOIN inboxes ON inboxes.id = emails.inbox_id")
+	q = ScopeInboxes(q, ctx)
 	if inbox := c.Query("inbox_id"); inbox != "" {
 		q = q.Where("emails.inbox_id = ?", inbox)
 	}
@@ -567,8 +634,9 @@ type conversationListItem struct {
 }
 
 func (a App) listConversations(c *gin.Context) {
-	user := mw.CurrentUser(c)
-	q := a.DB.Joins("JOIN inboxes ON inboxes.id = emails.inbox_id").Where("inboxes.user_id = ?", user.ID)
+	ctx := teams.FromGin(c)
+	q := a.DB.Joins("JOIN inboxes ON inboxes.id = emails.inbox_id")
+	q = ScopeInboxes(q, ctx)
 	if inbox := c.Query("inbox_id"); inbox != "" {
 		q = q.Where("emails.inbox_id = ?", inbox)
 	}
@@ -646,7 +714,9 @@ func (a App) listConversations(c *gin.Context) {
 
 	if len(order) > 0 {
 		var sent []db.SentEmailLog
-		if err := a.DB.Where("user_id = ? AND conversation_id IN ?", user.ID, order).Find(&sent).Error; err != nil {
+		sq := a.DB.Model(&db.SentEmailLog{})
+		sq = ScopeSentEmailLogs(sq, ctx)
+		if err := sq.Where("conversation_id IN ?", order).Find(&sent).Error; err != nil {
 			response.Error(c, http.StatusInternalServerError, "conversation_list_failed", "could not load sent conversations")
 			return
 		}
@@ -709,9 +779,11 @@ func conversationKey(row db.Email) string {
 }
 
 func (a App) getEmail(c *gin.Context) {
-	user := mw.CurrentUser(c)
+	ctx := teams.FromGin(c)
 	var row db.Email
-	err := a.DB.Preload("Attachments").Joins("JOIN inboxes ON inboxes.id = emails.inbox_id").Where("emails.id = ? AND inboxes.user_id = ?", c.Param("id"), user.ID).First(&row).Error
+	q := a.DB.Preload("Attachments").Joins("JOIN inboxes ON inboxes.id = emails.inbox_id").Where("emails.id = ?", c.Param("id"))
+	q = ScopeInboxes(q, ctx)
+	err := q.First(&row).Error
 	if err != nil {
 		response.Error(c, http.StatusNotFound, "not_found", "email not found")
 		return
@@ -733,8 +805,9 @@ func (a App) replyEmail(c *gin.Context) {
 		response.Error(c, http.StatusServiceUnavailable, "sender_unavailable", "email sender is not configured")
 		return
 	}
+	ctx := teams.FromGin(c)
 	user := mw.CurrentUser(c)
-	original, inbox, ok := a.loadOwnedEmailWithInbox(c, user.ID, c.Param("id"))
+	original, inbox, ok := a.loadOwnedEmailWithInbox(c, ctx, c.Param("id"))
 	if !ok {
 		return
 	}
@@ -787,6 +860,8 @@ func (a App) replyEmail(c *gin.Context) {
 		bodyText = quotedBody(original)
 	}
 	log := db.SentEmailLog{
+		UserID:               user.ID,
+		TeamID:               ShouldSetTeamID(ctx),
 		OriginalEmailID:      &original.ID,
 		ParentEmailID:        &original.ID,
 		ConversationID:       conversationID,
@@ -812,8 +887,8 @@ func (a App) replyEmail(c *gin.Context) {
 }
 
 func (a App) getEmailReplyStatus(c *gin.Context) {
-	user := mw.CurrentUser(c)
-	_, inbox, ok := a.loadOwnedEmailWithInbox(c, user.ID, c.Param("id"))
+	ctx := teams.FromGin(c)
+	_, inbox, ok := a.loadOwnedEmailWithInbox(c, ctx, c.Param("id"))
 	if !ok {
 		return
 	}
@@ -827,24 +902,24 @@ func (a App) getEmailReplyStatus(c *gin.Context) {
 }
 
 func (a App) getEmailThread(c *gin.Context) {
-	user := mw.CurrentUser(c)
-	original, _, ok := a.loadOwnedEmailWithInbox(c, user.ID, c.Param("id"))
+	ctx := teams.FromGin(c)
+	original, _, ok := a.loadOwnedEmailWithInbox(c, ctx, c.Param("id"))
 	if !ok {
 		return
 	}
 	conversationID := firstNonEmpty(original.ConversationID, original.MessageID)
 	var inbound []db.Email
-	if err := a.DB.Joins("JOIN inboxes ON inboxes.id = emails.inbox_id").
-		Where("inboxes.user_id = ? AND emails.conversation_id = ?", user.ID, conversationID).
-		Order("emails.received_at ASC").
-		Find(&inbound).Error; err != nil {
+	inQ := a.DB.Joins("JOIN inboxes ON inboxes.id = emails.inbox_id").
+		Where("emails.conversation_id = ?", conversationID)
+	inQ = ScopeInboxes(inQ, ctx)
+	if err := inQ.Order("emails.received_at ASC").Find(&inbound).Error; err != nil {
 		response.Error(c, http.StatusInternalServerError, "thread_failed", "could not load thread")
 		return
 	}
 	var sent []db.SentEmailLog
-	if err := a.DB.Where("user_id = ? AND conversation_id = ?", user.ID, conversationID).
-		Order("COALESCE(sent_at, created_at) ASC").
-		Find(&sent).Error; err != nil {
+	sQ := a.DB.Model(&db.SentEmailLog{}).Where("conversation_id = ?", conversationID)
+	sQ = ScopeSentEmailLogs(sQ, ctx)
+	if err := sQ.Order("COALESCE(sent_at, created_at) ASC").Find(&sent).Error; err != nil {
 		response.Error(c, http.StatusInternalServerError, "thread_failed", "could not load thread")
 		return
 	}
@@ -859,9 +934,11 @@ func (a App) getEmailThread(c *gin.Context) {
 	response.OK(c, gin.H{"conversation_id": conversationID, "root_email_id": original.RootEmailID, "items": items})
 }
 
-func (a App) loadOwnedEmailWithInbox(c *gin.Context, userID uuid.UUID, id string) (db.Email, db.Inbox, bool) {
+func (a App) loadOwnedEmailWithInbox(c *gin.Context, ctx teams.ActiveContext, id string) (db.Email, db.Inbox, bool) {
 	var row db.Email
-	err := a.DB.Preload("Attachments").Joins("JOIN inboxes ON inboxes.id = emails.inbox_id").Where("emails.id = ? AND inboxes.user_id = ?", id, userID).First(&row).Error
+	q := a.DB.Preload("Attachments").Joins("JOIN inboxes ON inboxes.id = emails.inbox_id").Where("emails.id = ?", id)
+	q = ScopeInboxes(q, ctx)
+	err := q.First(&row).Error
 	if err != nil {
 		response.Error(c, http.StatusNotFound, "not_found", "email not found")
 		return db.Email{}, db.Inbox{}, false
@@ -1098,22 +1175,44 @@ func firstNonEmpty(values ...string) string {
 }
 
 func (a App) markRead(c *gin.Context) {
-	user := mw.CurrentUser(c)
-	a.DB.Exec("UPDATE emails SET is_read = true FROM inboxes WHERE inboxes.id = emails.inbox_id AND emails.id = ? AND inboxes.user_id = ?", c.Param("id"), user.ID)
+	ctx := teams.FromGin(c)
+	q := a.DB.Table("emails").
+		Joins("JOIN inboxes ON inboxes.id = emails.inbox_id").
+		Where("emails.id = ?", c.Param("id"))
+	if ctx.Personal {
+		q = q.Where("inboxes.user_id = ? AND inboxes.team_id IS NULL", ctx.UserID)
+	} else {
+		q = q.Where("inboxes.team_id = ?", ctx.TeamID)
+	}
+	q.Update("is_read", true)
 	response.OK(c, gin.H{"ok": true})
 }
 
 func (a App) deleteEmail(c *gin.Context) {
-	user := mw.CurrentUser(c)
-	a.DB.Exec("UPDATE emails SET deleted_at = NOW() FROM inboxes WHERE inboxes.id = emails.inbox_id AND emails.id = ? AND inboxes.user_id = ?", c.Param("id"), user.ID)
+	ctx := teams.FromGin(c)
+	q := a.DB.Table("emails").
+		Joins("JOIN inboxes ON inboxes.id = emails.inbox_id").
+		Where("emails.id = ?", c.Param("id"))
+	if ctx.Personal {
+		q = q.Where("inboxes.user_id = ? AND inboxes.team_id IS NULL", ctx.UserID)
+	} else {
+		q = q.Where("inboxes.team_id = ?", ctx.TeamID)
+	}
+	q.Update("deleted_at", time.Now())
 	response.OK(c, gin.H{"ok": true})
 }
 
 func (a App) downloadAttachment(c *gin.Context) {
-	user := mw.CurrentUser(c)
+	ctx := teams.FromGin(c)
 	var att db.Attachment
-	err := a.DB.Joins("JOIN emails ON emails.id = attachments.email_id JOIN inboxes ON inboxes.id = emails.inbox_id").
-		Where("emails.id = ? AND attachments.id = ? AND inboxes.user_id = ?", c.Param("id"), c.Param("attachmentId"), user.ID).First(&att).Error
+	q := a.DB.Joins("JOIN emails ON emails.id = attachments.email_id JOIN inboxes ON inboxes.id = emails.inbox_id").
+		Where("emails.id = ? AND attachments.id = ?", c.Param("id"), c.Param("attachmentId"))
+	if ctx.Personal {
+		q = q.Where("inboxes.user_id = ? AND inboxes.team_id IS NULL", ctx.UserID)
+	} else {
+		q = q.Where("inboxes.team_id = ?", ctx.TeamID)
+	}
+	err := q.First(&att).Error
 	if err != nil {
 		response.Error(c, http.StatusNotFound, "not_found", "attachment not found")
 		return
@@ -1126,10 +1225,15 @@ func (a App) downloadAttachment(c *gin.Context) {
 }
 
 func (a App) dashboard(c *gin.Context) {
+	ctx := teams.FromGin(c)
 	user := mw.CurrentUser(c)
 	var inboxes, today int64
-	a.DB.Model(&db.Inbox{}).Where("user_id = ? AND is_active = true", user.ID).Count(&inboxes)
-	a.DB.Model(&db.Email{}).Joins("JOIN inboxes ON inboxes.id = emails.inbox_id").Where("inboxes.user_id = ? AND emails.received_at >= ?", user.ID, time.Now().Truncate(24*time.Hour)).Count(&today)
+	inQ := a.DB.Model(&db.Inbox{})
+	inQ = ScopeInboxes(inQ, ctx)
+	inQ.Where("is_active = true").Count(&inboxes)
+	mailQ := a.DB.Model(&db.Email{}).Joins("JOIN inboxes ON inboxes.id = emails.inbox_id")
+	mailQ = ScopeInboxes(mailQ, ctx)
+	mailQ.Where("emails.received_at >= ?", time.Now().Truncate(24*time.Hour)).Count(&today)
 	response.OK(c, gin.H{"mail_today": today, "storage_used_bytes": user.StorageUsedBytes, "active_inboxes": inboxes})
 }
 
@@ -1141,6 +1245,7 @@ func (a App) outboundStatus(c *gin.Context) {
 }
 
 func (a App) events(c *gin.Context) {
+	ctx := teams.FromGin(c)
 	user := mw.CurrentUser(c)
 	if a.Redis == nil {
 		response.Error(c, http.StatusServiceUnavailable, "redis_unavailable", "realtime events not available")
@@ -1164,10 +1269,19 @@ func (a App) events(c *gin.Context) {
 			return
 		case msg := <-ch:
 			var ev realtime.Event
-			if json.Unmarshal([]byte(msg.Payload), &ev) == nil && ev.UserID == user.ID {
-				fmt.Fprintf(writer, "event: %s\ndata: %s\n\n", ev.Type, msg.Payload)
-				writer.Flush()
-				c.Writer.Flush()
+			if json.Unmarshal([]byte(msg.Payload), &ev) == nil {
+				// Personal events: direct user match
+				if ev.UserID == user.ID {
+					fmt.Fprintf(writer, "event: %s\ndata: %s\n\n", ev.Type, msg.Payload)
+					writer.Flush()
+					c.Writer.Flush()
+				}
+				// Team events: match if user is a team member (simplified: deliver if team_id matches)
+				if ev.TeamID != nil && !ctx.Personal && *ev.TeamID == *ctx.TeamID {
+					fmt.Fprintf(writer, "event: %s\ndata: %s\n\n", ev.Type, msg.Payload)
+					writer.Flush()
+					c.Writer.Flush()
+				}
 			}
 		}
 	}
@@ -1203,6 +1317,15 @@ func (a App) adminUserStatus(c *gin.Context) {
 		response.Error(c, http.StatusNotFound, "not_found", "user not found")
 		return
 	}
+	if req.IsActive {
+		var target db.User
+		if err := a.DB.First(&target, "id = ?", c.Param("id")).Error; err == nil {
+			if _, err := a.Teams.EnsureDefaultWorkspace(c.Request.Context(), target); err != nil {
+				response.Error(c, http.StatusInternalServerError, "workspace_failed", "could not create default workspace")
+				return
+			}
+		}
+	}
 	payload, _ := json.Marshal(gin.H{"user_id": c.Param("id"), "is_active": req.IsActive})
 	_ = a.DB.Create(&db.AuditLog{ActorID: &current.ID, Type: "user.status", Payload: payload}).Error
 	response.OK(c, gin.H{"ok": true})
@@ -1213,6 +1336,7 @@ func (a App) adminUserQuotas(c *gin.Context) {
 	var req struct {
 		MaxDomains          *int   `json:"max_domains"`
 		MaxInboxes          *int   `json:"max_inboxes"`
+		MaxMembers          *int   `json:"max_members"`
 		MaxAttachmentSizeMB *int   `json:"max_attachment_size_mb"`
 		MaxMessageSizeMB    *int   `json:"max_message_size_mb"`
 		MaxStorageBytes     *int64 `json:"max_storage_bytes"`
@@ -1235,6 +1359,13 @@ func (a App) adminUserQuotas(c *gin.Context) {
 			return
 		}
 		updates["max_inboxes"] = *req.MaxInboxes
+	}
+	if req.MaxMembers != nil {
+		if *req.MaxMembers < 0 {
+			response.Error(c, http.StatusBadRequest, "invalid_quota", "max_members must be >= 0")
+			return
+		}
+		updates["max_members"] = *req.MaxMembers
 	}
 	if req.MaxAttachmentSizeMB != nil {
 		if *req.MaxAttachmentSizeMB < 1 {
@@ -1306,6 +1437,15 @@ func (a App) adminDeleteUser(c *gin.Context) {
 
 	var files []string
 	err = a.DB.Transaction(func(tx *gorm.DB) error {
+		// Soft-delete team memberships
+		if err := tx.Model(&db.TeamMember{}).Where("user_id = ? AND deleted_at IS NULL", targetID).Update("deleted_at", time.Now()).Error; err != nil {
+			return err
+		}
+		// Cancel pending invites by email
+		if err := tx.Model(&db.TeamInvite{}).Where("lower(email) = ? AND status = ?", strings.ToLower(target.Email), db.TeamInviteStatusPending).Update("status", db.TeamInviteStatusCancelled).Error; err != nil {
+			return err
+		}
+
 		var inboxIDs []uuid.UUID
 		if err := tx.Model(&db.Inbox{}).Unscoped().Where("user_id = ?", targetID).Pluck("id", &inboxIDs).Error; err != nil {
 			return err
@@ -1410,7 +1550,18 @@ func bind(c *gin.Context, target any) bool {
 }
 
 func ownerFirst(database *gorm.DB, id string, userID uuid.UUID, dest any) error {
-	err := database.Where("id = ? AND user_id = ?", id, userID).First(dest).Error
+	err := database.Where("id = ? AND user_id = ? AND team_id IS NULL", id, userID).First(dest).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	return err
+}
+
+// ownerOrTeamFirst finds a resource by id, scoping by either personal or team context.
+func ownerOrTeamFirst(database *gorm.DB, id string, ctx teams.ActiveContext, dest any) error {
+	q := database.Where("id = ?", id)
+	q = ScopeDomains(q, ctx)
+	err := q.First(dest).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return err
 	}

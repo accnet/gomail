@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	mw "gomail/internal/http/middleware"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -80,11 +82,11 @@ func TestCreateApiKeyOneTimeReveal(t *testing.T) {
 	}
 
 	var createBody struct {
-		ID          string `json:"id"`
-		Name        string `json:"name"`
-		Scopes      string `json:"scopes"`
-		FullApiKey  string `json:"full_api_key"`
-		KeyPrefix   string `json:"key_prefix"`
+		ID           string `json:"id"`
+		Name         string `json:"name"`
+		Scopes       string `json:"scopes"`
+		FullApiKey   string `json:"full_api_key"`
+		KeyPrefix    string `json:"key_prefix"`
 		SmtpSettings struct {
 			Host           string `json:"host"`
 			Port587        string `json:"port_587"`
@@ -117,8 +119,8 @@ func TestCreateApiKeyOneTimeReveal(t *testing.T) {
 		t.Fatalf("list api keys status = %d body=%s", listResp.Code, listResp.Body.String())
 	}
 	var listBody []struct {
-		ID          string `json:"id"`
-		FullApiKey  string `json:"full_api_key"`
+		ID           string `json:"id"`
+		FullApiKey   string `json:"full_api_key"`
 		SmtpSettings struct {
 			Host string `json:"host"`
 		} `json:"smtp_settings"`
@@ -162,6 +164,103 @@ func TestCreateApiKeyOneTimeReveal(t *testing.T) {
 	router2.ServeHTTP(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 (bad request body), got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestApiKeysAreScopedByWorkspace(t *testing.T) {
+	setGinMode()
+	app, database := newApiKeyTestApp(t, apiKeyTestConfig())
+	router := app.Router()
+
+	user := createUser(t, database, "workspace-keys@test.local", true, false, false)
+	token := bearerToken(t, app, user)
+	team := db.Team{Name: "Workspace Keys", OwnerID: user.ID}
+	if err := database.Create(&team).Error; err != nil {
+		t.Fatal(err)
+	}
+	member := db.TeamMember{
+		TeamID:      team.ID,
+		UserID:      user.ID,
+		Role:        db.TeamRoleOwner,
+		Permissions: datatypes.JSON(`[]`),
+	}
+	if err := database.Create(&member).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	personalResp := doJSON(t, router, http.MethodPost, "/api/api-keys", map[string]any{
+		"name":  "Personal Key",
+		"scope": "send_email",
+	}, token)
+	if personalResp.Code != http.StatusCreated {
+		t.Fatalf("create personal key = %d body=%s", personalResp.Code, personalResp.Body.String())
+	}
+	var personalBody struct {
+		ID     string  `json:"id"`
+		TeamID *string `json:"team_id"`
+	}
+	if err := json.Unmarshal(personalResp.Body.Bytes(), &personalBody); err != nil {
+		t.Fatal(err)
+	}
+	if personalBody.TeamID != nil {
+		t.Fatalf("expected personal key team_id to be nil, got %q", *personalBody.TeamID)
+	}
+
+	teamResp := doJSONWithTeam(t, router, http.MethodPost, "/api/api-keys", map[string]any{
+		"name":  "Workspace Key",
+		"scope": "send_email",
+	}, token, team.ID.String())
+	if teamResp.Code != http.StatusCreated {
+		t.Fatalf("create workspace key = %d body=%s", teamResp.Code, teamResp.Body.String())
+	}
+	var teamBody struct {
+		ID     string  `json:"id"`
+		TeamID *string `json:"team_id"`
+	}
+	if err := json.Unmarshal(teamResp.Body.Bytes(), &teamBody); err != nil {
+		t.Fatal(err)
+	}
+	if teamBody.TeamID == nil || *teamBody.TeamID != team.ID.String() {
+		t.Fatalf("expected workspace key team_id %s, got %v", team.ID, teamBody.TeamID)
+	}
+
+	personalList := doJSON(t, router, http.MethodGet, "/api/api-keys", nil, token)
+	if personalList.Code != http.StatusOK {
+		t.Fatalf("list personal keys = %d body=%s", personalList.Code, personalList.Body.String())
+	}
+	var personalKeys []struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(personalList.Body.Bytes(), &personalKeys); err != nil {
+		t.Fatal(err)
+	}
+	if len(personalKeys) != 1 || personalKeys[0].ID != personalBody.ID {
+		t.Fatalf("expected only personal key in personal list, got %+v", personalKeys)
+	}
+
+	teamList := doJSONWithTeam(t, router, http.MethodGet, "/api/api-keys", nil, token, team.ID.String())
+	if teamList.Code != http.StatusOK {
+		t.Fatalf("list workspace keys = %d body=%s", teamList.Code, teamList.Body.String())
+	}
+	var teamKeys []struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(teamList.Body.Bytes(), &teamKeys); err != nil {
+		t.Fatal(err)
+	}
+	if len(teamKeys) != 1 || teamKeys[0].ID != teamBody.ID {
+		t.Fatalf("expected only workspace key in workspace list, got %+v", teamKeys)
+	}
+
+	getTeamFromPersonal := doJSON(t, router, http.MethodGet, "/api/api-keys/"+teamBody.ID, nil, token)
+	if getTeamFromPersonal.Code != http.StatusNotFound {
+		t.Fatalf("expected workspace key hidden from personal context, got %d body=%s", getTeamFromPersonal.Code, getTeamFromPersonal.Body.String())
+	}
+	getPersonalFromTeam := doJSONWithTeam(t, router, http.MethodGet, "/api/api-keys/"+personalBody.ID, nil, token, team.ID.String())
+	if getPersonalFromTeam.Code != http.StatusNotFound {
+		t.Fatalf("expected personal key hidden from workspace context, got %d body=%s", getPersonalFromTeam.Code, getPersonalFromTeam.Body.String())
 	}
 }
 
@@ -358,6 +457,29 @@ func TestDeleteApiKey(t *testing.T) {
 	if getResp.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 after delete, got %d", getResp.Code)
 	}
+}
+
+func doJSONWithTeam(t *testing.T, router http.Handler, method, path string, body any, token, teamID string) *httptest.ResponseRecorder {
+	t.Helper()
+	var payload []byte
+	if body != nil {
+		var err error
+		payload, err = json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	req := httptest.NewRequest(method, path, bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if teamID != "" {
+		req.Header.Set("X-Team-Id", teamID)
+	}
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	return w
 }
 
 func ptrTime(t time.Time) *time.Time {

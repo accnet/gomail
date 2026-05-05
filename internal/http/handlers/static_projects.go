@@ -10,6 +10,7 @@ import (
 	"gomail/internal/db"
 	mw "gomail/internal/http/middleware"
 	"gomail/internal/staticprojects"
+	"gomail/internal/teams"
 	"gomail/pkg/response"
 
 	"github.com/gin-gonic/gin"
@@ -28,8 +29,9 @@ func NewStaticProjectsHandler(svc *staticprojects.Service) *StaticProjectsHandle
 
 // List returns all static projects for the current user.
 func (h *StaticProjectsHandler) List(c *gin.Context) {
-	user := mw.CurrentUser(c)
-	projects, err := h.Service.List(user.ID)
+	ctx := teams.FromGin(c)
+	oc := staticprojects.OwnerContext{UserID: ctx.UserID, TeamID: ctx.TeamID}
+	projects, err := h.Service.List(oc)
 	if err != nil {
 		response.Error(c, http.StatusInternalServerError, "list_failed", "could not list projects")
 		return
@@ -39,13 +41,14 @@ func (h *StaticProjectsHandler) List(c *gin.Context) {
 
 // Get returns a single static project.
 func (h *StaticProjectsHandler) Get(c *gin.Context) {
-	user := mw.CurrentUser(c)
+	ctx := teams.FromGin(c)
 	projectID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		response.Error(c, http.StatusBadRequest, "invalid_id", "invalid project id")
 		return
 	}
-	project, err := h.Service.Get(user.ID, projectID)
+	oc := staticprojects.OwnerContext{UserID: ctx.UserID, TeamID: ctx.TeamID}
+	project, err := h.Service.Get(oc, projectID)
 	if err != nil {
 		if errors.Is(err, staticprojects.ErrNotFound) {
 			response.Error(c, http.StatusNotFound, "not_found", "project not found")
@@ -194,7 +197,7 @@ func (h *StaticProjectsHandler) Redeploy(c *gin.Context) {
 
 // ToggleStatus enables or disables a project.
 func (h *StaticProjectsHandler) ToggleStatus(c *gin.Context) {
-	user := mw.CurrentUser(c)
+	ctx := teams.FromGin(c)
 	projectID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		response.Error(c, http.StatusBadRequest, "invalid_id", "invalid project id")
@@ -208,7 +211,8 @@ func (h *StaticProjectsHandler) ToggleStatus(c *gin.Context) {
 		return
 	}
 
-	project, err := h.Service.ToggleStatus(user.ID, projectID, req.IsActive)
+	oc := staticprojects.OwnerContext{UserID: ctx.UserID, TeamID: ctx.TeamID}
+	project, err := h.Service.ToggleStatus(oc, projectID, req.IsActive)
 	if err != nil {
 		if errors.Is(err, staticprojects.ErrNotFound) {
 			response.Error(c, http.StatusNotFound, "not_found", "project not found")
@@ -218,21 +222,22 @@ func (h *StaticProjectsHandler) ToggleStatus(c *gin.Context) {
 		return
 	}
 	if h.Service.AuditLogger != nil {
-		h.Service.AuditLogger.LogToggleStatus(user.ID, project.ID, project.IsActive)
+		h.Service.AuditLogger.LogToggleStatus(ctx.UserID, project.ID, project.IsActive)
 	}
 	response.OK(c, project)
 }
 
 // Delete removes a static project.
 func (h *StaticProjectsHandler) Delete(c *gin.Context) {
-	user := mw.CurrentUser(c)
+	ctx := teams.FromGin(c)
 	projectID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		response.Error(c, http.StatusBadRequest, "invalid_id", "invalid project id")
 		return
 	}
 
-	if err := h.Service.Delete(user.ID, projectID); err != nil {
+	oc := staticprojects.OwnerContext{UserID: ctx.UserID, TeamID: ctx.TeamID}
+	if err := h.Service.Delete(oc, projectID); err != nil {
 		if errors.Is(err, staticprojects.ErrNotFound) {
 			response.Error(c, http.StatusNotFound, "not_found", "project not found")
 			return
@@ -240,9 +245,8 @@ func (h *StaticProjectsHandler) Delete(c *gin.Context) {
 		response.Error(c, http.StatusInternalServerError, "delete_failed", "could not delete project")
 		return
 	}
-	// Note: project already deleted, audit the delete with projectID
 	if h.Service.AuditLogger != nil {
-		h.Service.AuditLogger.LogDelete(user.ID, projectID, "")
+		h.Service.AuditLogger.LogDelete(ctx.UserID, projectID, "")
 	}
 	response.OK(c, gin.H{"ok": true})
 }
@@ -283,6 +287,8 @@ func (h *StaticProjectsHandler) AssignDomain(c *gin.Context) {
 			response.Error(c, http.StatusBadRequest, "domain_not_verified", "domain must be verified and owned by you")
 		case errors.Is(err, staticprojects.ErrDomainAlreadyBound):
 			response.Error(c, http.StatusConflict, "domain_already_bound", "domain is already bound to another project")
+		case errors.Is(err, staticprojects.ErrDomainReserved):
+			response.Error(c, http.StatusBadRequest, "domain_reserved", "SaaS domain cannot be assigned to a website")
 		default:
 			response.Error(c, http.StatusInternalServerError, "assign_failed", "could not assign domain")
 		}

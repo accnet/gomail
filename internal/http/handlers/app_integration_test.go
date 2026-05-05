@@ -16,6 +16,7 @@ import (
 	"gomail/internal/db"
 	"gomail/internal/dns"
 	"gomail/internal/mail/outbound"
+	teamservice "gomail/internal/teams"
 
 	"github.com/google/uuid"
 	"gorm.io/driver/sqlite"
@@ -191,6 +192,60 @@ func TestEventsStreamAcceptsQueryToken(t *testing.T) {
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("events stream status = %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestInviteMemberSendsEmailFromSaaSDomain(t *testing.T) {
+	app, database := newTestApp(t)
+	app.Config.SaaSDomain = "saas.test"
+	app.Config.AppBaseURL = "https://mail.saas.test"
+	app.Teams = teamservice.NewService(database)
+
+	owner := createUser(t, database, "owner@saas.test", true, true, false)
+	team, err := app.Teams.CreateTeam(context.Background(), owner.ID, "Product Team")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var captured outbound.Message
+	app.SendOutbound = func(userID uuid.UUID, msg outbound.Message, sentLog db.SentEmailLog) error {
+		if userID != owner.ID {
+			t.Fatalf("sender user id = %s want %s", userID, owner.ID)
+		}
+		if sentLog.TeamID == nil || *sentLog.TeamID != team.ID {
+			t.Fatalf("sent log team id = %v want %s", sentLog.TeamID, team.ID)
+		}
+		captured = msg
+		return nil
+	}
+
+	router := app.Router()
+	token := bearerToken(t, app, owner)
+	resp := doJSON(t, router, http.MethodPost, "/api/teams/"+team.ID.String()+"/invites", map[string]any{
+		"email": "member@example.net",
+		"role":  db.TeamRoleMember,
+	}, token)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("invite status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	var body struct {
+		Token     string `json:"token"`
+		EmailSent bool   `json:"email_sent"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Token == "" || !body.EmailSent {
+		t.Fatalf("invite response token=%q email_sent=%v", body.Token, body.EmailSent)
+	}
+	if captured.From != "no-reply@saas.test" {
+		t.Fatalf("from = %q want no-reply@saas.test", captured.From)
+	}
+	if len(captured.To) != 1 || captured.To[0] != "member@example.net" {
+		t.Fatalf("to = %#v", captured.To)
+	}
+	if !strings.Contains(captured.TextBody, "https://mail.saas.test/app/join.html?token="+body.Token) {
+		t.Fatalf("invite body missing join link: %s", captured.TextBody)
 	}
 }
 

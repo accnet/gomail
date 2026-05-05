@@ -52,11 +52,11 @@ func toProjectResponse(project *db.StaticProject, used, max int) *ProjectRespons
 }
 
 // reloadAndRespond reloads the project from DB and builds a response with quota.
-func (s *Service) reloadAndRespond(projectID, userID uuid.UUID) (*ProjectResponse, error) {
+func (s *Service) reloadAndRespond(projectID uuid.UUID, oc OwnerContext) (*ProjectResponse, error) {
 	var project db.StaticProject
 	if err := s.DB.First(&project, "id = ?", projectID).Error; err != nil {
 		return nil, err
 	}
-	used, max, _ := s.QuotaInfo(userID)
+	used, max, _ := s.QuotaInfo(oc.UserID)
 	return toProjectResponse(&project, used, max), nil
 }

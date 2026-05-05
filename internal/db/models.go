@@ -44,6 +44,10 @@ const (
 	DomainBindingStatusAssigned  = "assigned"
 	DomainBindingStatusSSLActive = "ssl_active"
 
+	AppSettingSaaSDomainMode = "saas_domain_mode"
+	SaaSDomainModeApp        = "app"
+	SaaSDomainModeLanding    = "landing"
+
 	// API Key scopes
 	ApiKeyScopeSendEmail     = "send_email"
 	ApiKeyScopeReadInbox     = "read_inbox"
@@ -55,6 +59,18 @@ const (
 	// Sent email statuses
 	SentEmailStatusSent   = "sent"
 	SentEmailStatusFailed = "failed"
+
+	// Team roles
+	TeamRoleOwner  = "owner"
+	TeamRoleAdmin  = "admin"
+	TeamRoleMember = "member"
+
+	// Team invite statuses
+	TeamInviteStatusPending   = "pending"
+	TeamInviteStatusAccepted  = "accepted"
+	TeamInviteStatusDeclined  = "declined"
+	TeamInviteStatusExpired   = "expired"
+	TeamInviteStatusCancelled = "cancelled"
 )
 
 type User struct {
@@ -67,6 +83,7 @@ type User struct {
 	IsActive            bool           `gorm:"not null;default:false" json:"is_active"`
 	MaxDomains          int            `gorm:"not null;default:5" json:"max_domains"`
 	MaxInboxes          int            `gorm:"not null;default:50" json:"max_inboxes"`
+	MaxMembers          int            `gorm:"not null;default:5" json:"max_members"`
 	MaxAttachmentSizeMB int            `gorm:"not null;default:25" json:"max_attachment_size_mb"`
 	MaxMessageSizeMB    int            `gorm:"not null;default:25" json:"max_message_size_mb"`
 	MaxStorageBytes     int64          `gorm:"not null;default:10737418240" json:"max_storage_bytes"`
@@ -107,6 +124,7 @@ func (t *RefreshToken) BeforeCreate(tx *gorm.DB) error {
 type Domain struct {
 	ID                 uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
 	UserID             uuid.UUID      `gorm:"type:uuid;index;not null" json:"user_id"`
+	TeamID             *uuid.UUID     `gorm:"type:uuid;index" json:"team_id,omitempty"`
 	Name               string         `gorm:"uniqueIndex;not null" json:"name"`
 	Status             string         `gorm:"index;not null;default:pending" json:"status"`
 	WarningStatus      string         `json:"warning_status"`
@@ -161,6 +179,7 @@ func (a *DomainEmailAuth) BeforeCreate(tx *gorm.DB) error {
 type Inbox struct {
 	ID        uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
 	UserID    uuid.UUID      `gorm:"type:uuid;index;not null" json:"user_id"`
+	TeamID    *uuid.UUID     `gorm:"type:uuid;index" json:"team_id,omitempty"`
 	DomainID  uuid.UUID      `gorm:"type:uuid;uniqueIndex:idx_domain_local;index;not null" json:"domain_id"`
 	LocalPart string         `gorm:"uniqueIndex:idx_domain_local;not null" json:"local_part"`
 	Address   string         `gorm:"uniqueIndex;not null" json:"address"`
@@ -255,6 +274,7 @@ func (e *DomainEvent) BeforeCreate(tx *gorm.DB) error {
 type AuditLog struct {
 	ID        uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
 	ActorID   *uuid.UUID     `gorm:"type:uuid;index" json:"actor_id"`
+	TeamID    *uuid.UUID     `gorm:"type:uuid;index" json:"team_id,omitempty"`
 	Type      string         `gorm:"index;not null" json:"type"`
 	Payload   datatypes.JSON `json:"payload_json"`
 	CreatedAt time.Time      `json:"created_at"`
@@ -267,9 +287,17 @@ func (l *AuditLog) BeforeCreate(tx *gorm.DB) error {
 	return nil
 }
 
+type AppSetting struct {
+	Key       string    `gorm:"primaryKey;not null" json:"key"`
+	Value     string    `gorm:"not null" json:"value"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 type StaticProject struct {
 	ID                   uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
 	UserID               uuid.UUID      `gorm:"type:uuid;index;not null" json:"user_id"`
+	TeamID               *uuid.UUID     `gorm:"type:uuid;index" json:"team_id,omitempty"`
 	Name                 string         `gorm:"not null" json:"name"`
 	Subdomain            string         `gorm:"uniqueIndex;not null" json:"subdomain"`
 	DomainID             *uuid.UUID     `gorm:"type:uuid;uniqueIndex:idx_static_project_domain;index" json:"domain_id"`
@@ -306,6 +334,7 @@ func (p *StaticProject) BeforeCreate(tx *gorm.DB) error {
 type ApiKey struct {
 	ID             uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
 	UserID         uuid.UUID      `gorm:"type:uuid;index;not null" json:"user_id"`
+	TeamID         *uuid.UUID     `gorm:"type:uuid;index" json:"team_id,omitempty"`
 	Name           string         `gorm:"not null" json:"name"`
 	KeyPrefix      string         `gorm:"not null;index" json:"key_prefix"`
 	KeyHash        string         `gorm:"not null;uniqueIndex" json:"-"`
@@ -331,15 +360,16 @@ func (a *ApiKey) BeforeCreate(tx *gorm.DB) error {
 
 // ApiKeyUsageLog tracks API key usage for audit and rate limiting.
 type ApiKeyUsageLog struct {
-	ID         uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
-	ApiKeyID   uuid.UUID `gorm:"type:uuid;index;not null" json:"api_key_id"`
-	UserID     uuid.UUID `gorm:"type:uuid;index;not null" json:"user_id"`
-	Endpoint   string    `json:"endpoint"`
-	Method     string    `json:"method"`
-	StatusCode int       `json:"status_code"`
-	IPAddress  string    `json:"ip_address"`
-	UserAgent  string    `json:"user_agent"`
-	CreatedAt  time.Time `json:"created_at"`
+	ID         uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
+	ApiKeyID   uuid.UUID  `gorm:"type:uuid;index;not null" json:"api_key_id"`
+	UserID     uuid.UUID  `gorm:"type:uuid;index;not null" json:"user_id"`
+	TeamID     *uuid.UUID `gorm:"type:uuid;index" json:"team_id,omitempty"`
+	Endpoint   string     `json:"endpoint"`
+	Method     string     `json:"method"`
+	StatusCode int        `json:"status_code"`
+	IPAddress  string     `json:"ip_address"`
+	UserAgent  string     `json:"user_agent"`
+	CreatedAt  time.Time  `json:"created_at"`
 }
 
 func (l *ApiKeyUsageLog) BeforeCreate(tx *gorm.DB) error {
@@ -353,6 +383,7 @@ func (l *ApiKeyUsageLog) BeforeCreate(tx *gorm.DB) error {
 type SentEmailLog struct {
 	ID                   uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
 	UserID               uuid.UUID      `gorm:"type:uuid;index;not null" json:"user_id"`
+	TeamID               *uuid.UUID     `gorm:"type:uuid;index" json:"team_id,omitempty"`
 	ApiKeyID             *uuid.UUID     `gorm:"type:uuid;index" json:"api_key_id,omitempty"`
 	OriginalEmailID      *uuid.UUID     `gorm:"column:original_email_id;type:uuid;-:migration" json:"original_email_id,omitempty"`
 	ParentEmailID        *uuid.UUID     `gorm:"column:parent_email_id;type:uuid;-:migration" json:"parent_email_id,omitempty"`
@@ -378,6 +409,71 @@ type SentEmailLog struct {
 func (s *SentEmailLog) BeforeCreate(tx *gorm.DB) error {
 	if s.ID == uuid.Nil {
 		s.ID = uuid.New()
+	}
+	return nil
+}
+
+// ── Teams ──────────────────────────────────────────────────────────────────
+
+type Team struct {
+	ID        uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
+	Name      string         `gorm:"not null" json:"name"`
+	OwnerID   uuid.UUID      `gorm:"type:uuid;index;not null" json:"owner_id"`
+	IsDefault bool           `gorm:"not null;default:false" json:"is_default"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
+}
+
+func (t *Team) BeforeCreate(tx *gorm.DB) error {
+	if t.ID == uuid.Nil {
+		t.ID = uuid.New()
+	}
+	return nil
+}
+
+type TeamMember struct {
+	ID          uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
+	TeamID      uuid.UUID      `gorm:"type:uuid;index;not null" json:"team_id"`
+	UserID      uuid.UUID      `gorm:"type:uuid;index;not null" json:"user_id"`
+	Role        string         `gorm:"not null;default:member" json:"role"`
+	Permissions datatypes.JSON `gorm:"type:jsonb;not null;default:'[]'" json:"permissions"`
+	JoinedAt    time.Time      `json:"joined_at"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
+}
+
+func (m *TeamMember) BeforeCreate(tx *gorm.DB) error {
+	if m.ID == uuid.Nil {
+		m.ID = uuid.New()
+	}
+	if m.JoinedAt.IsZero() {
+		m.JoinedAt = time.Now()
+	}
+	return nil
+}
+
+type TeamInvite struct {
+	ID          uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
+	TeamID      uuid.UUID      `gorm:"type:uuid;index;not null" json:"team_id"`
+	Email       string         `gorm:"not null" json:"email"`
+	Role        string         `gorm:"not null;default:member" json:"role"`
+	Permissions datatypes.JSON `gorm:"type:jsonb;not null;default:'[]'" json:"permissions"`
+	InviterID   uuid.UUID      `gorm:"type:uuid;not null" json:"inviter_id"`
+	Status      string         `gorm:"not null;default:pending" json:"status"`
+	TokenHash   string         `gorm:"not null;uniqueIndex" json:"-"`
+	TokenPlain  string         `gorm:"" json:"-"`
+	ExpiresAt   time.Time      `json:"expires_at"`
+	AcceptedAt  *time.Time     `json:"accepted_at"`
+	DeclinedAt  *time.Time     `json:"declined_at"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+}
+
+func (i *TeamInvite) BeforeCreate(tx *gorm.DB) error {
+	if i.ID == uuid.Nil {
+		i.ID = uuid.New()
 	}
 	return nil
 }

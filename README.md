@@ -186,6 +186,7 @@ sudo APP_DOMAIN=mail.example.com \
 |---|---|
 | `APP_DOMAIN` | Primary web/API domain (e.g. `mail.example.com`) |
 | `SAAS_DOMAIN` | Root SaaS domain (e.g. `example.com`) |
+| `LANDING_ROOT` | Folder served when the SaaS domain behavior is set to Landing (default: `./landing`) |
 | `SMTP_HOSTNAME` | Public MX hostname (e.g. `mx.example.com`) |
 | `SMTP_AUTH_HOSTNAME` | SMTP submission hostname (e.g. `smtp.example.com`) |
 | `STATIC_SITES_BASE_DOMAIN` | (Optional) Wildcard base for hosted sites |
@@ -210,10 +211,10 @@ Nginx routes requests based on the `Host` header:
 | Host header matches | Proxied to | Serves |
 |---|---|---|
 | `$APP_DOMAIN` (e.g. `mail.example.com`) | API (`:8080`) | Web app (login, dashboard, API) |
-| `$SAAS_DOMAIN` (e.g. `example.com`) | API (`:8080`) | Web app — same as above |
+| `$SAAS_DOMAIN` (e.g. `example.com`) | API (`:8080`) | Redirects to the app or serves `LANDING_ROOT`, based on Settings > General |
 | Any other host (`_` default) | static-server (`:8090`) | Static sites, custom domains, `*.sites.example.net` |
 
-> **Note:** Both `APP_DOMAIN` and `SAAS_DOMAIN` route to the app. This means visiting `example.com` and `mail.example.com` both take you to the login page. The `SAAS_DOMAIN` is also the base for user email domains (e.g. `@example.com` mailboxes).
+> **Note:** `SAAS_DOMAIN` is reserved for the product root and cannot be assigned to a website. Use Settings > General to choose whether it redirects to the app or serves the landing folder.
 
 ### Upgrade
 

@@ -23,6 +23,12 @@ const api = async (path, options = {}) => {
   return res.json();
 };
 
+function clearStoredSession() {
+  localStorage.removeItem("access_token");
+  localStorage.removeItem("refresh_token");
+  localStorage.removeItem("active_team_id");
+}
+
 // --- DOM refs ---
 const els = {
   tabSignin: document.getElementById("tab-signin"),
@@ -62,12 +68,13 @@ els.loginForm.onsubmit = async (e) => {
     const data = await api("/auth/login", {
       method: "POST",
       body: JSON.stringify({
-        email: els.loginEmail.value,
+        email: els.loginEmail.value.trim(),
         password: els.loginPassword.value
       })
     });
     localStorage.setItem("access_token", data.access_token);
     localStorage.setItem("refresh_token", data.refresh_token);
+    localStorage.removeItem("active_team_id");
     window.location.href = "/app/";
   } catch (error) {
     els.loginError.textContent = error.message;
@@ -101,6 +108,19 @@ els.registerForm.onsubmit = async (e) => {
 };
 
 // --- Check if already logged in ---
-if (localStorage.getItem("access_token")) {
-  window.location.href = "/app/";
-}
+(async () => {
+  const existingToken = localStorage.getItem("access_token");
+  if (!existingToken) return;
+  try {
+    const res = await fetch("/api/me", {
+      headers: { Authorization: `Bearer ${existingToken}` }
+    });
+    if (res.ok) {
+      window.location.href = "/app/";
+      return;
+    }
+  } catch (_) {
+    // Fall through and clear stale credentials.
+  }
+  clearStoredSession();
+})();

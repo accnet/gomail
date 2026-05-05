@@ -49,6 +49,9 @@ func autoMigrateLocked(database *gorm.DB) error {
 	if err := database.AutoMigrate(
 		&User{},
 		&RefreshToken{},
+		&Team{},
+		&TeamMember{},
+		&TeamInvite{},
 		&Domain{},
 		&DomainEmailAuth{},
 		&Inbox{},
@@ -56,6 +59,7 @@ func autoMigrateLocked(database *gorm.DB) error {
 		&Attachment{},
 		&DomainEvent{},
 		&AuditLog{},
+		&AppSetting{},
 		&StaticProject{},
 		&ApiKey{},
 		&ApiKeyUsageLog{},
@@ -89,7 +93,38 @@ func autoMigrateLocked(database *gorm.DB) error {
 	if err := ensureThreadingSchema(database); err != nil {
 		return err
 	}
+	if err := ensureTeamsSchema(database); err != nil {
+		return err
+	}
 	return BackfillEmailThreading(database, 500)
+}
+
+func ensureTeamsSchema(database *gorm.DB) error {
+	dialect := database.Dialector.Name()
+	if dialect != "postgres" {
+		return nil
+	}
+	statements := []string{
+		"CREATE INDEX IF NOT EXISTS idx_teams_owner ON teams(owner_id) WHERE deleted_at IS NULL",
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_team_members_active ON team_members(team_id, user_id) WHERE deleted_at IS NULL",
+		"CREATE INDEX IF NOT EXISTS idx_team_members_user ON team_members(user_id) WHERE deleted_at IS NULL",
+		"CREATE INDEX IF NOT EXISTS idx_team_invites_team ON team_invites(team_id)",
+		"CREATE INDEX IF NOT EXISTS idx_team_invites_email ON team_invites(lower(email))",
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_team_invites_pending_email ON team_invites(team_id, lower(email)) WHERE status = 'pending'",
+		"CREATE INDEX IF NOT EXISTS idx_domains_team ON domains(team_id) WHERE deleted_at IS NULL AND team_id IS NOT NULL",
+		"CREATE INDEX IF NOT EXISTS idx_inboxes_team ON inboxes(team_id) WHERE deleted_at IS NULL AND team_id IS NOT NULL",
+		"CREATE INDEX IF NOT EXISTS idx_api_keys_team ON api_keys(team_id) WHERE deleted_at IS NULL AND team_id IS NOT NULL",
+		"CREATE INDEX IF NOT EXISTS idx_static_projects_team ON static_projects(team_id) WHERE deleted_at IS NULL AND team_id IS NOT NULL",
+		"CREATE INDEX IF NOT EXISTS idx_sent_email_logs_team ON sent_email_logs(team_id) WHERE team_id IS NOT NULL",
+		"CREATE INDEX IF NOT EXISTS idx_teams_default_owner ON teams(owner_id) WHERE deleted_at IS NULL AND is_default = true",
+		"UPDATE team_members SET joined_at = created_at WHERE joined_at < '1970-01-01'",
+	}
+	for _, stmt := range statements {
+		if err := database.Exec(stmt).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func ensureThreadingSchema(database *gorm.DB) error {
@@ -302,6 +337,7 @@ func SeedSuperAdmin(ctx context.Context, database *gorm.DB, cfg config.Config) e
 		IsActive:            true,
 		MaxDomains:          cfg.DefaultAdminMaxDomains,
 		MaxInboxes:          cfg.DefaultAdminMaxInboxes,
+		MaxMembers:          cfg.DefaultAdminMaxMembers,
 		MaxMessageSizeMB:    cfg.DefaultAdminMaxMessageSizeMB,
 		MaxAttachmentSizeMB: cfg.DefaultAdminMaxAttachmentSizeMB,
 		MaxStorageBytes:     int64(cfg.DefaultAdminMaxStorageGB) * 1024 * 1024 * 1024,

@@ -13,7 +13,7 @@ check: test vet
 	node --check web/login.js
 
 dev-up:
-	docker compose up -d
+	docker compose up -d postgres redis
 
 dev-down:
 	docker compose down

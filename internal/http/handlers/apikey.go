@@ -8,6 +8,7 @@ import (
 
 	"gomail/internal/db"
 	mw "gomail/internal/http/middleware"
+	"gomail/internal/teams"
 	"gomail/pkg/response"
 
 	"github.com/gin-gonic/gin"
@@ -80,6 +81,7 @@ func RegisterApiKeyRoutes(r gin.IRouter, database *gorm.DB, authMiddleware gin.H
 func createApiKey(database *gorm.DB, s smtpSettings) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		uid, _, _ := mw.UserAndApiKey(c)
+		ctx := teams.FromGin(c)
 		var body createApiKeyBody
 		if err := c.ShouldBindJSON(&body); err != nil {
 			response.BadRequest(c, err.Error())
@@ -94,6 +96,7 @@ func createApiKey(database *gorm.DB, s smtpSettings) gin.HandlerFunc {
 
 		ak := db.ApiKey{
 			UserID:    uid,
+			TeamID:    ShouldSetTeamID(ctx),
 			Name:      body.Name,
 			KeyPrefix: prefix,
 			KeyHash:   hash,
@@ -126,9 +129,10 @@ func createApiKey(database *gorm.DB, s smtpSettings) gin.HandlerFunc {
 
 func listApiKeys(database *gorm.DB, s smtpSettings) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		uid, _, _ := mw.UserAndApiKey(c)
+		ctx := teams.FromGin(c)
 		var keys []db.ApiKey
-		if err := database.Where("user_id = ?", uid).Order("created_at DESC").Find(&keys).Error; err != nil {
+		q := ScopeApiKeys(database.Model(&db.ApiKey{}), ctx)
+		if err := q.Order("created_at DESC").Find(&keys).Error; err != nil {
 			response.ServerError(c, "failed to list api keys")
 			return
 		}
@@ -148,10 +152,11 @@ func getApiKeySettings(s smtpSettings) gin.HandlerFunc {
 
 func getApiKey(database *gorm.DB, s smtpSettings) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		uid, _, _ := mw.UserAndApiKey(c)
+		ctx := teams.FromGin(c)
 		id := c.Param("id")
 		var ak db.ApiKey
-		if err := database.Where("id = ? AND user_id = ?", id, uid).First(&ak).Error; err != nil {
+		q := ScopeApiKeys(database.Model(&db.ApiKey{}), ctx)
+		if err := q.Where("id = ?", id).First(&ak).Error; err != nil {
 			response.NotFound(c, "api key not found")
 			return
 		}
@@ -161,10 +166,11 @@ func getApiKey(database *gorm.DB, s smtpSettings) gin.HandlerFunc {
 
 func patchApiKey(database *gorm.DB, s smtpSettings) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		uid, _, _ := mw.UserAndApiKey(c)
+		ctx := teams.FromGin(c)
 		id := c.Param("id")
 		var ak db.ApiKey
-		if err := database.Where("id = ? AND user_id = ?", id, uid).First(&ak).Error; err != nil {
+		q := ScopeApiKeys(database.Model(&db.ApiKey{}), ctx)
+		if err := q.Where("id = ?", id).First(&ak).Error; err != nil {
 			response.NotFound(c, "api key not found")
 			return
 		}
@@ -217,10 +223,11 @@ func patchApiKey(database *gorm.DB, s smtpSettings) gin.HandlerFunc {
 
 func revokeApiKey(database *gorm.DB, s smtpSettings) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		uid, _, _ := mw.UserAndApiKey(c)
+		ctx := teams.FromGin(c)
 		id := c.Param("id")
 		var ak db.ApiKey
-		if err := database.Where("id = ? AND user_id = ?", id, uid).First(&ak).Error; err != nil {
+		q := ScopeApiKeys(database.Model(&db.ApiKey{}), ctx)
+		if err := q.Where("id = ?", id).First(&ak).Error; err != nil {
 			response.NotFound(c, "api key not found")
 			return
 		}
@@ -235,10 +242,16 @@ func revokeApiKey(database *gorm.DB, s smtpSettings) gin.HandlerFunc {
 
 func deleteApiKey(database *gorm.DB, s smtpSettings) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		uid, _, _ := mw.UserAndApiKey(c)
+		ctx := teams.FromGin(c)
 		id := c.Param("id")
-		if err := database.Where("id = ? AND user_id = ?", id, uid).Delete(&db.ApiKey{}).Error; err != nil {
+		q := ScopeApiKeys(database.Model(&db.ApiKey{}), ctx)
+		result := q.Where("id = ?", id).Delete(&db.ApiKey{})
+		if result.Error != nil {
 			response.ServerError(c, "failed to delete api key")
+			return
+		}
+		if result.RowsAffected == 0 {
+			response.NotFound(c, "api key not found")
 			return
 		}
 		response.OK(c, gin.H{"deleted": true})
@@ -247,12 +260,13 @@ func deleteApiKey(database *gorm.DB, s smtpSettings) gin.HandlerFunc {
 
 func usageApiKey(database *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		uid, _, _ := mw.UserAndApiKey(c)
+		ctx := teams.FromGin(c)
 		id := c.Param("id")
 
 		// Verify ownership
 		var ak db.ApiKey
-		if err := database.Where("id = ? AND user_id = ?", id, uid).First(&ak).Error; err != nil {
+		q := ScopeApiKeys(database.Model(&db.ApiKey{}), ctx)
+		if err := q.Where("id = ?", id).First(&ak).Error; err != nil {
 			response.NotFound(c, "api key not found")
 			return
 		}

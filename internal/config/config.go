@@ -14,11 +14,12 @@ import (
 )
 
 type Config struct {
-	AppEnv     string
-	AppName    string
-	AppBaseURL string
-	APIBaseURL string
-	SaaSDomain string
+	AppEnv      string
+	AppName     string
+	AppBaseURL  string
+	APIBaseURL  string
+	SaaSDomain  string
+	LandingRoot string
 
 	HTTPHost string
 	HTTPPort string
@@ -42,6 +43,7 @@ type Config struct {
 	DefaultAdminName                string
 	DefaultAdminMaxDomains          int
 	DefaultAdminMaxInboxes          int
+	DefaultAdminMaxMembers          int
 	DefaultAdminMaxMessageSizeMB    int
 	DefaultAdminMaxAttachmentSizeMB int
 	DefaultAdminMaxStorageGB        int
@@ -117,6 +119,7 @@ func Load() (Config, error) {
 		AppBaseURL:                      env("APP_BASE_URL", "http://localhost:8080"),
 		APIBaseURL:                      env("API_BASE_URL", "http://localhost:8080/api"),
 		SaaSDomain:                      env("SAAS_DOMAIN", "localhost"),
+		LandingRoot:                     env("LANDING_ROOT", "./landing"),
 		HTTPHost:                        env("HTTP_HOST", "0.0.0.0"),
 		HTTPPort:                        env("HTTP_PORT", "8080"),
 		SMTPHost:                        env("SMTP_HOST", "0.0.0.0"),
@@ -135,6 +138,7 @@ func Load() (Config, error) {
 		DefaultAdminName:                env("DEFAULT_ADMIN_NAME", "Super Admin"),
 		DefaultAdminMaxDomains:          envInt("DEFAULT_ADMIN_MAX_DOMAINS", 100),
 		DefaultAdminMaxInboxes:          envInt("DEFAULT_ADMIN_MAX_INBOXES", 1000),
+		DefaultAdminMaxMembers:          envInt("DEFAULT_ADMIN_MAX_MEMBERS", 100),
 		DefaultAdminMaxMessageSizeMB:    envInt("DEFAULT_ADMIN_MAX_MESSAGE_SIZE_MB", 25),
 		DefaultAdminMaxAttachmentSizeMB: envInt("DEFAULT_ADMIN_MAX_ATTACHMENT_SIZE_MB", 25),
 		DefaultAdminMaxStorageGB:        envInt("DEFAULT_ADMIN_MAX_STORAGE_GB", 100),

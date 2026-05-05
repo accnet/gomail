@@ -66,6 +66,9 @@ const viewMeta = {
   websites: { section: "Hosting", title: "Websites" },
   "api-keys": { section: "Relay", title: "API Keys" },
   users: { section: "Admin", title: "Users" },
+  workspace: { section: "Workspace", title: "Workspace" },
+  members: { section: "Workspace", title: "Members" },
+  teams: { section: "Workspace", title: "Workspace" },
   settings: { section: "Account", title: "Settings" }
 };
 
@@ -73,10 +76,13 @@ const defaultView = "dashboard";
 
 // --- API Helper ---
 const api = async (path, options = {}) => {
-  const { refresh, ...fetchOptions } = options;
+  const { refresh, team = true, ...fetchOptions } = options;
+  const activeTeamID = localStorage.getItem("active_team_id") || "";
+  const includeTeamHeader = team && activeTeamID && !path.startsWith("/teams") && !path.startsWith("/team-invites");
   const headers = {
     "Content-Type": "application/json",
     ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+    ...(includeTeamHeader ? { "X-Team-Id": activeTeamID } : {}),
     ...(fetchOptions.headers || {})
   };
   if (fetchOptions.body instanceof FormData) {
@@ -95,10 +101,18 @@ const api = async (path, options = {}) => {
   if (!res.ok) {
     let body = { message: "Request failed" };
     try {
-      body = await res.json();
+      body = await res.clone().json();
     } catch (_) {
       const text = await res.text().catch(() => "");
       if (text) body.message = text;
+    }
+    const staleTeamContext =
+      includeTeamHeader &&
+      (body.code === "invalid_team_id" ||
+        (body.code === "forbidden" && body.message === "not a member of this team"));
+    if (staleTeamContext && refresh !== false) {
+      localStorage.removeItem("active_team_id");
+      return api(path, { ...options, refresh: false, team: false });
     }
     throw new Error(body.message || "Request failed");
   }
@@ -196,7 +210,9 @@ async function renderView(view, options = {}) {
   }
   else if (base === "api-keys") await renderApiKeys();
   else if (base === "users") await renderUsers();
-  else if (base === "settings") renderSettings();
+  else if (base === "workspace" || base === "teams") await renderWorkspace();
+  else if (base === "members") await renderMembers();
+  else if (base === "settings") await renderSettings();
 }
 
 
@@ -438,8 +454,9 @@ async function bootstrapSession() {
     return;
   }
   try {
-    currentUser = await api("/me");
+    currentUser = await api("/me", { team: false });
     updateAccountUI();
+    await initTeamSwitcher();
     connectEvents();
     await renderView(viewFromURL(), { updateURL: true, replaceURL: !window.location.hash });
   } catch (_) {
@@ -457,6 +474,883 @@ function updateAccountUI() {
     node.classList.toggle("hidden", !currentUser.is_super_admin);
   });
 }
+
+// ── Workspace Switcher ─────────────────────────────────────────────────────
+let userTeams = [];
+
+async function initTeamSwitcher() {
+  try {
+    userTeams = await api("/teams");
+    const activeTeamID = localStorage.getItem("active_team_id") || "";
+    const activeTeam = userTeams.find(t => t.id === activeTeamID);
+    if (userTeams.length > 0 && !activeTeam) {
+      localStorage.setItem("active_team_id", userTeams[0].id);
+    }
+    renderTeamSwitcher();
+  } catch {
+    localStorage.removeItem("active_team_id");
+    // Workspaces may not be available yet, hide switcher
+  }
+}
+
+function renderTeamSwitcher() {
+  const switcher = document.getElementById("team-switcher");
+  const label = document.getElementById("team-switcher-label");
+  const list = document.getElementById("team-switcher-list");
+
+  if (!userTeams || userTeams.length === 0) {
+    switcher.classList.add("hidden");
+    return;
+  }
+  switcher.classList.remove("hidden");
+
+  const activeTeamID = localStorage.getItem("active_team_id") || "";
+  const activeTeam = userTeams.find(t => t.id === activeTeamID);
+
+  if (activeTeam) {
+    label.textContent = activeTeam.name;
+  } else {
+    label.textContent = "Workspace";
+  }
+
+  list.innerHTML = userTeams.map(t => {
+    const isActive = t.id === activeTeamID;
+    return `<button data-team="${t.id}" class="dropdown-item ${isActive ? 'active' : ''}">${escHtml(t.name)}</button>`;
+  }).join("");
+
+  // Wire up team selection
+  list.querySelectorAll("button").forEach(btn => {
+    btn.addEventListener("click", () => {
+      selectTeam(btn.dataset.team);
+    });
+  });
+}
+
+function selectTeam(teamID) {
+  if (teamID) {
+    localStorage.setItem("active_team_id", teamID);
+  } else if (userTeams.length > 0) {
+    localStorage.setItem("active_team_id", userTeams[0].id);
+  } else {
+    localStorage.removeItem("active_team_id");
+  }
+  renderTeamSwitcher();
+  document.getElementById("team-switcher-dropdown").classList.add("hidden");
+  // Reload current view
+  renderView(currentView, { updateURL: false });
+}
+
+function escHtml(s) {
+  const d = document.createElement("div");
+  d.textContent = s || "";
+  return d.innerHTML;
+}
+
+function parseScopes(permissions) {
+  if (!permissions) return [];
+  try {
+    const scopes = typeof permissions === "string" ? JSON.parse(permissions) : permissions;
+    return Array.isArray(scopes) ? scopes : [];
+  } catch { return []; }
+}
+
+function activeWorkspace() {
+  const activeTeamID = localStorage.getItem("active_team_id") || "";
+  return userTeams.find(t => t.id === activeTeamID) || userTeams[0] || null;
+}
+
+// Workspace switcher dropdown toggle
+document.addEventListener("click", (e) => {
+  const trigger = document.getElementById("team-switcher-trigger");
+  const dropdown = document.getElementById("team-switcher-dropdown");
+  if (!trigger || !dropdown) return;
+  if (trigger.contains(e.target)) {
+    dropdown.classList.toggle("hidden");
+  } else if (!dropdown.contains(e.target)) {
+    dropdown.classList.add("hidden");
+  }
+});
+
+// Create workspace from switcher
+const createTeamBtn = document.getElementById("team-switcher-create");
+if (createTeamBtn) {
+  createTeamBtn.addEventListener("click", () => {
+    showCreateTeamModal();
+    // Close the dropdown
+    const dropdown = document.getElementById("team-switcher-dropdown");
+    if (dropdown) dropdown.classList.add("hidden");
+  });
+}
+
+// ── Scroll to top helper ───────────────────────────────────────────────────
+function scrollToTop() {
+  const content = document.getElementById("page-content");
+  if (content) content.scrollTop = 0;
+  window.scrollTo(0, 0);
+}
+
+// ── Workspace View ─────────────────────────────────────────────────────────
+async function renderWorkspace() {
+  return renderTeams();
+}
+
+async function renderTeams() {
+  setView("workspace");
+  const content = document.getElementById("page-content");
+  content.innerHTML = '<div class="teams-container"><p style="padding:24px;color:var(--color-text-secondary)">Loading workspace...</p></div>';
+
+  try {
+    const teams = await api("/teams");
+    const activeTeamID = localStorage.getItem("active_team_id") || "";
+
+    if (!teams || teams.length === 0) {
+      content.innerHTML = `
+        <div class="teams-container">
+          <div class="page-header">
+            <h1>Workspace</h1>
+          </div>
+          <div class="teams-empty">
+            <div class="teams-empty-icon">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
+            </div>
+            <p class="teams-empty-title">No workspace yet</p>
+            <p class="teams-empty-desc">Workspaces let you collaborate with others by sharing domains, API keys, and websites.</p>
+            <button id="teams-create-btn-empty" class="btn btn-primary">+ Create Workspace</button>
+          </div>
+        </div>
+      `;
+      document.getElementById("teams-create-btn-empty").addEventListener("click", () => showCreateTeamModal());
+      return;
+    }
+
+    // Summary stats
+    const totalMembers = teams.reduce((s, t) => s + (t.member_count || 0), 0);
+    const ownedTeams = teams.filter(t => t.role === 'owner').length;
+
+    content.innerHTML = `
+      <div class="teams-container">
+        <div class="page-header">
+          <h1>Workspace</h1>
+        </div>
+
+        <div class="team-summary">
+          <div class="team-summary-item">
+            <div class="team-summary-icon members">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>
+            </div>
+            <div class="team-summary-info">
+              <span class="team-summary-value">${teams.length}</span>
+              <span class="team-summary-label">Workspaces</span>
+            </div>
+          </div>
+          <div class="team-summary-item">
+            <div class="team-summary-icon members">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
+            </div>
+            <div class="team-summary-info">
+              <span class="team-summary-value">${totalMembers}</span>
+              <span class="team-summary-label">Total Members</span>
+            </div>
+          </div>
+          <div class="team-summary-item">
+            <div class="team-summary-icon admins">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+            </div>
+            <div class="team-summary-info">
+              <span class="team-summary-value">${ownedTeams}</span>
+              <span class="team-summary-label">Owned</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="team-list">
+          <div class="team-list-header">
+            <span>Workspace</span>
+            <span>Role</span>
+            <span>Members</span>
+            <span style="text-align:right">Actions</span>
+          </div>
+          ${teams.map(t => {
+            const teamInitials = (t.name || '?').substring(0, 2).toUpperCase();
+            const isActive = t.id === activeTeamID;
+            return `
+              <div class="team-list-row">
+                <div class="team-list-cell name">
+                  <div class="team-list-avatar ${t.role === 'owner' ? '' : 'personal'}">
+                    <span>${escHtml(teamInitials)}</span>
+                  </div>
+                  <span class="team-list-name">${escHtml(t.name)}</span>
+                  ${isActive ? '<span class="team-list-active-tag">Active</span>' : ''}
+                </div>
+                <div class="team-list-cell role">
+                  <span class="member-role-badge ${t.role}">${t.role}</span>
+                </div>
+                <div class="team-list-cell members">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--color-text-tertiary);flex-shrink:0"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>
+                  <span style="font-size:13px;color:var(--color-text-secondary)">${t.member_count} member${t.member_count !== 1 ? 's' : ''}</span>
+                </div>
+                <div class="team-list-cell actions">
+                  ${!isActive ? `<button class="btn btn-secondary btn-sm switch-team-btn" data-id="${t.id}">Switch</button>` : ''}
+                  <button class="btn btn-primary btn-sm manage-team-btn" data-id="${t.id}">Manage</button>
+                </div>
+              </div>
+            `;
+          }).join("")}
+        </div>
+      </div>
+    `;
+
+    content.querySelectorAll(".switch-team-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        selectTeam(btn.dataset.id);
+        renderTeams();
+      });
+    });
+
+    content.querySelectorAll(".manage-team-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const team = teams.find(t => t.id === btn.dataset.id);
+        if (!team) return;
+        renderTeamManage(btn.dataset.id, team);
+      });
+    });
+  } catch (error) {
+    content.innerHTML = `
+      <div class="teams-container">
+        <div class="page-header"><h1>Workspace</h1></div>
+        <div class="teams-empty">
+          <div class="teams-empty-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          </div>
+          <p class="teams-empty-title">Could not load workspace</p>
+          <p class="teams-empty-desc">${escapeHTML(error.message || "Request failed")}</p>
+        </div>
+      </div>
+    `;
+  }
+}
+
+// ── Create Workspace Modal ────────────────────────────────────────────────
+function showCreateTeamModal() {
+  openModal("Create Workspace", `
+    <div class="modal-field">
+      <label>Workspace Name</label>
+      <input id="modal-team-name" type="text" placeholder="e.g. Acme Workspace, Engineering..." autofocus />
+      <span class="modal-field-hint">Give your workspace a clear, descriptive name</span>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost modal-close-btn">Cancel</button>
+      <button id="modal-create-team-submit" class="btn btn-primary">Create Workspace</button>
+    </div>
+  `);
+
+  const input = document.getElementById("modal-team-name");
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") submitCreateTeam(); });
+  document.getElementById("modal-create-team-submit").addEventListener("click", submitCreateTeam);
+  document.querySelector(".modal-close-btn").addEventListener("click", closeModal);
+
+  function submitCreateTeam() {
+    const name = input.value.trim();
+    if (!name) { input.focus(); return; }
+    document.getElementById("modal-create-team-submit").disabled = true;
+    document.getElementById("modal-create-team-submit").textContent = "Creating...";
+    api("/teams", { method: "POST", body: JSON.stringify({ name }) })
+      .then(() => { closeModal(); renderTeams(); initTeamSwitcher(); })
+      .catch(err => { alert(err.message); document.getElementById("modal-create-team-submit").disabled = false; document.getElementById("modal-create-team-submit").textContent = "Create Workspace"; });
+  }
+}
+
+async function renderMembers() {
+  setView("members");
+  const content = document.getElementById("page-content");
+  content.innerHTML = '<div class="teams-container"><p style="padding:24px;color:var(--color-text-secondary)">Loading members...</p></div>';
+
+  if (!userTeams || userTeams.length === 0) {
+    await initTeamSwitcher();
+  }
+  const workspace = activeWorkspace();
+  if (!workspace) {
+    content.innerHTML = `
+      <div class="teams-container">
+        <div class="page-header"><h1>Members</h1></div>
+        <div class="teams-empty">
+          <p class="teams-empty-title">No workspace available</p>
+          <p class="teams-empty-desc">Create a workspace before adding members.</p>
+          <button id="members-create-workspace" class="btn btn-primary">+ Create Workspace</button>
+        </div>
+      </div>
+    `;
+    document.getElementById("members-create-workspace").addEventListener("click", () => showCreateTeamModal());
+    return;
+  }
+
+  const canInvite = workspace.role === "owner" || workspace.role === "admin";
+  content.innerHTML = `
+    <div class="team-detail">
+      <div class="team-detail-header">
+        <div class="team-detail-header-info">
+          <h2>Members</h2>
+          <div class="team-detail-header-meta">
+            <span style="font-size:13px;color:var(--color-text-tertiary)">${escHtml(workspace.name)}</span>
+            <span class="member-role-badge ${workspace.role}">${workspace.role}</span>
+          </div>
+        </div>
+        ${canInvite ? `
+        <div class="team-detail-header-actions">
+          <button id="members-add-btn" class="btn btn-primary btn-sm">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            Add Member
+          </button>
+        </div>
+        ` : ''}
+      </div>
+      <div class="team-section">
+        <div class="team-section-header">
+          <h3>${escHtml(workspace.name)} Members</h3>
+        </div>
+        <div id="team-members-section" class="member-list">
+          <div class="member-row"><span style="color:var(--color-text-tertiary);padding:8px 0">Loading members...</span></div>
+        </div>
+      </div>
+      ${canInvite ? `
+      <div class="team-section">
+        <div class="team-section-header">
+          <h3>Pending Invites</h3>
+        </div>
+        <div id="team-invites-section" class="member-list">
+          <div class="invite-row"><span style="color:var(--color-text-tertiary);padding:8px 0">Loading invites...</span></div>
+        </div>
+      </div>
+      ` : ''}
+    </div>
+  `;
+  loadTeamMembers(workspace.id, workspace, () => renderMembers());
+  if (canInvite) {
+    loadTeamInvites(workspace.id, workspace, () => renderMembers());
+    document.getElementById("members-add-btn").addEventListener("click", () => showInviteModal(workspace.id, workspace, () => renderMembers()));
+  }
+}
+
+function renderTeamManage(teamID, team) {
+  const content = document.getElementById("page-content");
+  const isOwner = team.role === 'owner';
+  const isAdmin = team.role === 'owner' || team.role === 'admin';
+
+  content.innerHTML = `
+    <div class="team-detail">
+      <button class="team-detail-back" id="back-to-teams">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+        Back to Workspace
+      </button>
+
+      <div class="team-detail-header">
+        <div class="team-detail-header-info">
+          <h2>${escHtml(team.name)}</h2>
+          <div class="team-detail-header-meta">
+            <span class="member-role-badge ${team.role}">${team.role}</span>
+            <span style="font-size:13px;color:var(--color-text-tertiary)">${team.member_count} member${team.member_count !== 1 ? 's' : ''}</span>
+          </div>
+        </div>
+        ${isOwner ? `
+        <div class="team-detail-header-actions">
+          <button id="rename-team-btn" class="btn btn-secondary btn-sm">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+            Rename
+          </button>
+          ${team.can_delete ? `
+          <button id="delete-team-btn" class="btn btn-danger btn-sm">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+            Delete
+          </button>
+          ` : ''}
+        </div>
+        ` : ''}
+      </div>
+
+      <!-- Members Section -->
+      <div class="team-section">
+        <div class="team-section-header">
+          <h3>Members</h3>
+          ${isAdmin ? `<button id="invite-member-btn" class="btn btn-primary btn-sm">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            Invite
+          </button>` : ''}
+        </div>
+        <div id="team-members-section" class="member-list">
+          <div class="member-row"><span style="color:var(--color-text-tertiary);padding:8px 0">Loading members...</span></div>
+        </div>
+      </div>
+
+      <!-- Invites Section -->
+      ${isAdmin ? `
+      <div class="team-section">
+        <div class="team-section-header">
+          <h3>Pending Invites</h3>
+        </div>
+        <div id="team-invites-section" class="member-list">
+          <div class="invite-row"><span style="color:var(--color-text-tertiary);padding:8px 0">Loading invites...</span></div>
+        </div>
+      </div>
+      ` : ''}
+    </div>
+  `;
+
+  document.getElementById("back-to-teams").addEventListener("click", () => renderWorkspace());
+
+  // ── Load Members ───────────────────────────────────────────────────────
+  loadTeamMembers(teamID, team, () => renderTeamManage(teamID, team));
+
+  // ── Load Invites ───────────────────────────────────────────────────────
+  if (isAdmin) loadTeamInvites(teamID, team, () => renderTeamManage(teamID, team));
+
+  // ── Invite Button ──────────────────────────────────────────────────────
+  const inviteBtn = document.getElementById("invite-member-btn");
+  if (inviteBtn) inviteBtn.addEventListener("click", () => showInviteModal(teamID, team, () => renderTeamManage(teamID, team)));
+
+  // ── Rename Button ──────────────────────────────────────────────────────
+  const renameBtn = document.getElementById("rename-team-btn");
+  if (renameBtn) renameBtn.addEventListener("click", () => showRenameTeamModal(teamID, team));
+
+  // ── Delete Button ──────────────────────────────────────────────────────
+  const deleteBtn = document.getElementById("delete-team-btn");
+  if (deleteBtn) deleteBtn.addEventListener("click", () => showDeleteTeamModal(teamID, team));
+}
+
+// ── Load Team Members ──────────────────────────────────────────────────────
+async function loadTeamMembers(teamID, team, refresh = () => renderTeamManage(teamID, team)) {
+  const container = document.getElementById("team-members-section");
+  const isAdmin = team.role === 'owner' || team.role === 'admin';
+
+  try {
+    const members = await api(`/teams/${teamID}/members`);
+    if (!members || members.length === 0) {
+      container.innerHTML = '<div class="member-row"><span style="color:var(--color-text-tertiary);padding:8px 0">No members found</span></div>';
+      return;
+    }
+
+    container.innerHTML = members.map(m => {
+      const initials = (m.user_name || m.user_email || '?').substring(0, 2).toUpperCase();
+      const scopes = parseScopes(m.permissions);
+      return `
+        <div class="member-row">
+          <div class="member-avatar ${m.role}">${escHtml(initials)}</div>
+          <div class="member-info">
+            <span class="member-name">${escHtml(m.user_name || m.user_email)}</span>
+            <span class="member-email">${escHtml(m.user_email)}</span>
+          </div>
+          <span class="member-role-badge ${m.role}">${m.role}</span>
+          ${m.role !== 'owner' ? `
+          <div class="member-scopes">
+            ${scopes.length === 0
+              ? '<span class="scope-tag scope-tag-all">All scopes</span>'
+              : scopes.map(s => `<span class="scope-tag">${escHtml(s)}</span>`).join('')}
+          </div>
+          ` : '<span style="font-size:12px;color:var(--color-text-tertiary)">Full access</span>'}
+          ${isAdmin && m.role !== 'owner' ? `
+          <div class="member-actions">
+            <button class="btn btn-secondary btn-xs edit-member-btn" data-user="${m.user_id}" data-role="${m.role}" data-scopes="${escHtml(JSON.stringify(scopes))}">Edit</button>
+            <button class="btn btn-danger btn-xs remove-member-btn" data-user="${m.user_id}" data-name="${escHtml(m.user_name || m.user_email)}">Remove</button>
+          </div>
+          ` : ''}
+        </div>
+      `;
+    }).join("");
+
+    // Wire actions
+    container.querySelectorAll(".edit-member-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const scopes = btn.dataset.scopes ? JSON.parse(btn.dataset.scopes) : [];
+        showEditMemberModal(teamID, team, btn.dataset.user, btn.dataset.role, scopes);
+      });
+    });
+    container.querySelectorAll(".remove-member-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        showConfirmModal(
+          "Remove Member",
+          `Are you sure you want to remove <strong>${escHtml(btn.dataset.name)}</strong> from the workspace?`,
+          "Remove",
+          "btn-danger",
+          () => api(`/teams/${teamID}/members/${btn.dataset.user}`, { method: "DELETE" }).then(refresh)
+        );
+      });
+    });
+  } catch (err) {
+    container.innerHTML = `<div class="member-row"><span style="color:var(--color-danger)">Failed to load members: ${escapeHTML(err.message)}</span></div>`;
+  }
+}
+
+// ── Load Team Invites ──────────────────────────────────────────────────────
+async function loadTeamInvites(teamID, team, refresh = () => renderTeamManage(teamID, team)) {
+  const container = document.getElementById("team-invites-section");
+  if (!container) return;
+
+  try {
+    const invites = await api(`/teams/${teamID}/invites`);
+    if (!invites || invites.length === 0) {
+      container.innerHTML = '<div class="invite-row"><span style="color:var(--color-text-tertiary);padding:8px 0">No pending invites</span></div>';
+      return;
+    }
+
+    container.innerHTML = invites.map(inv => {
+      const expDate = new Date(inv.expires_at);
+      const isExpiring = expDate - new Date() < 24 * 60 * 60 * 1000; // < 24h
+      const inviteLink = inv.token ? `${location.origin}/app/join.html?token=${inv.token}` : '';
+      return `
+        <div class="invite-row">
+          <div class="invite-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+          </div>
+          <div class="invite-info">
+            <span class="invite-email">${escHtml(inv.email)}</span>
+            <span class="invite-meta">${inv.role}</span>
+          </div>
+          <span class="invite-expiry ${isExpiring ? 'expiring' : ''}">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            ${isExpiring ? 'Expires soon: ' : 'Expires: '}${expDate.toLocaleDateString()}
+          </span>
+          <div class="invite-actions">
+            <div class="action-dots">
+              <button class="action-dots-trigger icon-btn" title="Actions" style="width:28px;height:28px">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
+              </button>
+              <div class="action-dots-menu hidden">
+                ${inviteLink ? `<button class="action-dots-item copy-invite-link-btn" data-link="${escHtml(inviteLink)}">Copy Invite Link</button>` : ''}
+                <button class="action-dots-item action-dots-danger cancel-invite-btn" data-id="${inv.id}" data-email="${escHtml(inv.email)}">Cancel Invite</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    // Wire action-dots triggers
+    container.querySelectorAll(".action-dots-trigger").forEach(trigger => {
+      trigger.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const dots = trigger.closest(".action-dots");
+        const menu = dots?.querySelector(".action-dots-menu");
+        if (!menu) return;
+
+        // Close all other menus in this container
+        container.querySelectorAll(".action-dots-menu").forEach(m => { if (m !== menu) m.classList.add("hidden"); });
+
+        const isOpening = menu.classList.contains("hidden");
+        if (!isOpening) {
+          menu.classList.add("hidden");
+          return;
+        }
+
+        // Position menu
+        const rect = trigger.getBoundingClientRect();
+        const menuWidth = 180;
+        let left = rect.right - menuWidth;
+        let top = rect.bottom + 4;
+        if (left < 8) left = 8;
+        if (top + 120 > window.innerHeight) top = rect.top - 120;
+
+        menu.style.left = left + "px";
+        menu.style.top = top + "px";
+        menu.classList.remove("hidden");
+      });
+    });
+
+    // Cancel invite buttons
+    container.querySelectorAll(".cancel-invite-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        // Hide menu first
+        const menu = btn.closest(".action-dots-menu");
+        if (menu) menu.classList.add("hidden");
+
+        showConfirmModal(
+          "Cancel Invite",
+          `Cancel the invitation for <strong>${btn.dataset.email}</strong>?`,
+          "Cancel Invite",
+          "btn-danger",
+          () => api(`/teams/${teamID}/invites/${btn.dataset.id}`, { method: "DELETE" }).then(refresh)
+        );
+      });
+    });
+
+    // Copy invite link buttons
+    container.querySelectorAll(".copy-invite-link-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const menu = btn.closest(".action-dots-menu");
+        if (menu) menu.classList.add("hidden");
+
+        navigator.clipboard.writeText(btn.dataset.link).then(() => {
+          btn.textContent = "Copied!";
+          setTimeout(() => { btn.textContent = "Copy Invite Link"; }, 2000);
+        });
+      });
+    });
+  } catch (err) {
+    container.innerHTML = `<div class="invite-row"><span style="color:var(--color-danger)">Failed to load invites: ${escapeHTML(err.message)}</span></div>`;
+  }
+}
+
+// ── Modals for Workspace Operations ────────────────────────────────────────
+
+function showRenameTeamModal(teamID, team) {
+  openModal("Rename Workspace", `
+    <div class="modal-field">
+      <label>Workspace Name</label>
+      <input id="modal-rename-input" type="text" value="${escHtml(team.name)}" autofocus />
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost modal-close-btn">Cancel</button>
+      <button id="modal-rename-submit" class="btn btn-primary">Save Changes</button>
+    </div>
+  `);
+
+  const input = document.getElementById("modal-rename-input");
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+  document.getElementById("modal-rename-submit").addEventListener("click", submit);
+  document.querySelector(".modal-close-btn").addEventListener("click", closeModal);
+
+  function submit() {
+    const name = input.value.trim();
+    if (!name) return;
+    document.getElementById("modal-rename-submit").disabled = true;
+    api(`/teams/${teamID}`, { method: "PATCH", body: JSON.stringify({ name }) })
+      .then(() => { closeModal(); initTeamSwitcher(); renderTeams(); })
+      .catch(err => { alert(err.message); document.getElementById("modal-rename-submit").disabled = false; });
+  }
+}
+
+function showDeleteTeamModal(teamID, team) {
+  openModal("Delete Workspace", `
+    <div class="modal-warning">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      <span>This will permanently delete <strong>${escHtml(team.name)}</strong> and remove all members. Resources (domains, API keys, websites) will be kept for audit purposes.</span>
+    </div>
+    <div class="modal-field">
+      <label>Type the workspace name to confirm: <strong>${escHtml(team.name)}</strong></label>
+      <input id="modal-delete-confirm" type="text" placeholder="${escHtml(team.name)}" autofocus />
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost modal-close-btn">Cancel</button>
+      <button id="modal-delete-submit" class="btn btn-danger" disabled>Delete Workspace</button>
+    </div>
+  `);
+
+  const input = document.getElementById("modal-delete-confirm");
+  const btn = document.getElementById("modal-delete-submit");
+  input.addEventListener("input", () => {
+    btn.disabled = input.value.trim() !== team.name;
+  });
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !btn.disabled) submit(); });
+  btn.addEventListener("click", submit);
+  document.querySelector(".modal-close-btn").addEventListener("click", closeModal);
+
+  function submit() {
+    if (input.value.trim() !== team.name) return;
+    btn.disabled = true;
+    btn.textContent = "Deleting...";
+    api(`/teams/${teamID}`, { method: "DELETE" })
+      .then(() => { closeModal(); selectTeam(""); initTeamSwitcher(); renderTeams(); })
+      .catch(err => { alert(err.message); btn.disabled = false; btn.textContent = "Delete Workspace"; });
+  }
+}
+
+function showInviteModal(teamID, team, refresh = () => renderTeamManage(teamID, team)) {
+  const scopeOptions = ["email:access", "email:manage", "apikey:read", "apikey:create", "apikey:manage", "website:read", "website:deploy", "website:manage", "domain:manage", "member:manage"];
+  const selectedScopes = new Set(["email:access", "apikey:read", "website:read"]);
+
+  openModal("Invite Member", `
+    <div class="modal-field">
+      <label>Email Address</label>
+      <input id="modal-invite-email" type="email" placeholder="colleague@example.com" autofocus />
+      <span id="modal-invite-email-error" style="display:none;font-size:12px;color:var(--color-danger);margin-top:4px"></span>
+    </div>
+    <div class="modal-field">
+      <label>Permission Scopes</label>
+      <div class="scope-list">
+        ${scopeOptions.map(s => `
+          <div class="scope-item ${selectedScopes.has(s) ? 'selected' : ''}" data-scope="${s}">
+            <div class="scope-checkbox"></div>
+            <span>${s}</span>
+          </div>
+        `).join("")}
+      </div>
+      <span class="modal-field-hint">Select permissions for this member invite.</span>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost modal-close-btn">Cancel</button>
+      <button id="modal-invite-submit" class="btn btn-primary">Send Invite</button>
+    </div>
+  `);
+
+  document.querySelectorAll(".scope-item").forEach(item => {
+    item.addEventListener("click", () => {
+      item.classList.toggle("selected");
+      const scope = item.dataset.scope;
+      if (item.classList.contains("selected")) {
+        selectedScopes.add(scope);
+      } else {
+        selectedScopes.delete(scope);
+      }
+    });
+  });
+
+  const emailInput = document.getElementById("modal-invite-email");
+  const submitBtn = document.getElementById("modal-invite-submit");
+  const emailError = document.getElementById("modal-invite-email-error");
+
+  function validateEmail(email) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email);
+  }
+
+  emailInput.addEventListener("input", () => {
+    emailError.style.display = "none";
+    emailInput.style.borderColor = "";
+  });
+
+  emailInput.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+  submitBtn.addEventListener("click", submit);
+  document.querySelector(".modal-close-btn").addEventListener("click", closeModal);
+
+  function submit() {
+    const email = emailInput.value.trim();
+    if (!email) {
+      emailError.textContent = "Please enter an email address.";
+      emailError.style.display = "block";
+      emailInput.style.borderColor = "var(--color-danger)";
+      emailInput.focus();
+      return;
+    }
+    if (!validateEmail(email)) {
+      emailError.textContent = "Please enter a valid email address (e.g. user@example.com).";
+      emailError.style.display = "block";
+      emailInput.style.borderColor = "var(--color-danger)";
+      emailInput.focus();
+      return;
+    }
+    const scopes = [...selectedScopes];
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Sending...";
+
+    api(`/teams/${teamID}/invites`, {
+      method: "POST",
+      body: JSON.stringify({ email, role: "member", scopes }),
+    }).then(result => {
+      refresh();
+      closeModal();
+    }).catch(err => {
+      alert(err.message);
+      submitBtn.disabled = false;
+      submitBtn.textContent = "Send Invite";
+    });
+  }
+}
+
+function showEditMemberModal(teamID, team, userID, currentRole, currentScopes) {
+  const scopeOptions = ["email:access", "email:manage", "apikey:read", "apikey:create", "apikey:manage", "website:read", "website:deploy", "website:manage", "domain:manage", "member:manage"];
+
+  openModal("Edit Member", `
+    <div class="modal-field">
+      <label>Role</label>
+      <div class="role-selector">
+        <div class="role-option ${currentRole === 'member' ? 'selected' : ''}" data-role="member">
+          <div class="role-option-radio"></div>
+          <div>
+            <div style="font-weight:600">Member</div>
+            <div style="font-size:11px;color:var(--color-text-tertiary)">Scoped access</div>
+          </div>
+        </div>
+        <div class="role-option ${currentRole === 'admin' ? 'selected' : ''}" data-role="admin">
+          <div class="role-option-radio"></div>
+          <div>
+            <div style="font-weight:600">Admin</div>
+            <div style="font-size:11px;color:var(--color-text-tertiary)">Full management</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-field">
+      <label>Permission Scopes</label>
+      <div class="scope-list">
+        ${scopeOptions.map(s => `
+          <div class="scope-item ${currentScopes.includes(s) ? 'selected' : ''}" data-scope="${s}">
+            <div class="scope-checkbox"></div>
+            <span>${s}</span>
+          </div>
+        `).join("")}
+      </div>
+      <span class="modal-field-hint">Select specific permissions. Deselect all for default scopes.</span>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost modal-close-btn">Cancel</button>
+      <button id="modal-edit-member-submit" class="btn btn-primary">Save Changes</button>
+    </div>
+  `);
+
+  let selectedRole = currentRole;
+  const selectedScopes = new Set(currentScopes);
+
+  document.querySelectorAll(".role-option").forEach(opt => {
+    opt.addEventListener("click", () => {
+      document.querySelectorAll(".role-option").forEach(o => o.classList.remove("selected"));
+      opt.classList.add("selected");
+      selectedRole = opt.dataset.role;
+    });
+  });
+
+  document.querySelectorAll(".scope-item").forEach(item => {
+    item.addEventListener("click", () => {
+      item.classList.toggle("selected");
+      const scope = item.dataset.scope;
+      if (item.classList.contains("selected")) {
+        selectedScopes.add(scope);
+      } else {
+        selectedScopes.delete(scope);
+      }
+    });
+  });
+
+  document.getElementById("modal-edit-member-submit").addEventListener("click", () => {
+    const btn = document.getElementById("modal-edit-member-submit");
+    btn.disabled = true;
+    btn.textContent = "Saving...";
+    const scopes = [...selectedScopes];
+    api(`/teams/${teamID}/members/${userID}`, {
+      method: "PATCH",
+      body: JSON.stringify({ role: selectedRole, scopes }),
+    }).then(() => {
+      closeModal();
+      renderTeamManage(teamID, team);
+    }).catch(err => {
+      alert(err.message);
+      btn.disabled = false;
+      btn.textContent = "Save Changes";
+    });
+  });
+
+  document.querySelector(".modal-close-btn").addEventListener("click", closeModal);
+}
+
+// ── Confirmation Modal (reusable) ──────────────────────────────────────────
+function showConfirmModal(title, message, confirmText, confirmClass, onConfirm) {
+  openModal(title, `
+    <p style="font-size:14px;color:var(--color-text-secondary);line-height:1.6;margin-bottom:8px">${message}</p>
+    <div class="modal-actions">
+      <button class="btn btn-ghost modal-close-btn">Cancel</button>
+      <button id="modal-confirm-btn" class="btn ${confirmClass}">${confirmText}</button>
+    </div>
+  `);
+
+  document.getElementById("modal-confirm-btn").addEventListener("click", () => {
+    document.getElementById("modal-confirm-btn").disabled = true;
+    onConfirm().then(() => closeModal()).catch(err => {
+      alert(err.message);
+      document.getElementById("modal-confirm-btn").disabled = false;
+    });
+  });
+  document.querySelector(".modal-close-btn").addEventListener("click", closeModal);
+}
+
+// Fix: remove duplicate escHtml definition — keep the one in Team Switcher section
+// (the original escHtml is removed from this location)
 
 // --- Logout ---
 function logout() {
@@ -574,6 +1468,14 @@ document.querySelectorAll("[data-view]").forEach((button) => {
     await renderView(button.dataset.view);
   };
 });
+
+// --- Sidebar Create Team Button ---
+const sidebarCreateTeamBtn = document.getElementById("sidebar-create-team");
+if (sidebarCreateTeamBtn) {
+  sidebarCreateTeamBtn.addEventListener("click", () => {
+    showCreateTeamModal();
+  });
+}
 
 window.addEventListener("hashchange", async () => {
   if (!currentUser) return;
@@ -2365,9 +3267,10 @@ async function renderUsers() {
                 <th>User</th>
                 <th>Role</th>
                 <th>Status</th>
-                <th>Domains</th>
-                <th>Inboxes</th>
-                <th>Message</th>
+	                  <th>Domains</th>
+	                  <th>Inboxes</th>
+	                  <th>Members</th>
+	                  <th>Message</th>
                 <th>Storage</th>
                 <th>Websites</th>
                 <th>Created</th>
@@ -2383,9 +3286,10 @@ async function renderUsers() {
                   </td>
                   <td>${badge(roleLabel(user))}</td>
                   <td>${badge(user.is_active ? "active" : "disabled")}</td>
-                  <td style="color:var(--color-text-secondary)">${user.max_domains}</td>
-                  <td style="color:var(--color-text-secondary)">${user.max_inboxes}</td>
-                  <td style="color:var(--color-text-secondary)">${user.max_message_size_mb} MB</td>
+	                  <td style="color:var(--color-text-secondary)">${user.max_domains}</td>
+	                  <td style="color:var(--color-text-secondary)">${user.max_inboxes}</td>
+	                  <td style="color:var(--color-text-secondary)">${user.max_members ?? 5}</td>
+	                  <td style="color:var(--color-text-secondary)">${user.max_message_size_mb} MB</td>
                   <td>
                     <div style="min-width:160px">
                       <div class="quota-meter">
@@ -2417,7 +3321,7 @@ async function renderUsers() {
                 </tr>
               `).join("") : `
                 <tr>
-                  <td colspan="10">
+	                  <td colspan="11">
                     <div class="empty-state">
                       <p class="empty-state-title">No users found</p>
                     </div>
@@ -2478,36 +3382,42 @@ function openUserQuotaModal(userID) {
         <label for="quotaEmail">User</label>
         <input id="quotaEmail" value="${escapeHTML(user.email)}" disabled />
       </div>
-      <div class="grid-2 grid-2-equal" style="gap:12px">
-        <div class="form-group">
-          <label for="maxDomains">Max domains</label>
-          <input id="maxDomains" name="max_domains" type="number" min="0" step="1" value="${user.max_domains}" />
-        </div>
-        <div class="form-group">
-          <label for="maxInboxes">Max inboxes</label>
-          <input id="maxInboxes" name="max_inboxes" type="number" min="0" step="1" value="${user.max_inboxes}" />
-        </div>
-      </div>
-      <div class="grid-2 grid-2-equal" style="gap:12px">
-        <div class="form-group">
-          <label for="maxMessageSizeMB">Max message MB</label>
-          <input id="maxMessageSizeMB" name="max_message_size_mb" type="number" min="1" step="1" value="${user.max_message_size_mb}" />
-        </div>
-        <div class="form-group">
+	      <div class="grid-2 grid-2-equal" style="gap:12px">
+	        <div class="form-group">
+	          <label for="maxDomains">Max domains</label>
+	          <input id="maxDomains" name="max_domains" type="number" min="0" step="1" value="${user.max_domains}" />
+	        </div>
+	        <div class="form-group">
+	          <label for="maxInboxes">Max inboxes</label>
+	          <input id="maxInboxes" name="max_inboxes" type="number" min="0" step="1" value="${user.max_inboxes}" />
+	        </div>
+	      </div>
+	      <div class="grid-2 grid-2-equal" style="gap:12px">
+	        <div class="form-group">
+	          <label for="maxMembers">Max members</label>
+	          <input id="maxMembers" name="max_members" type="number" min="0" step="1" value="${user.max_members ?? 5}" />
+	        </div>
+	        <div class="form-group">
+	          <label for="maxWebsites">Max websites</label>
+	          <input id="maxWebsites" name="max_websites" type="number" min="0" step="1" value="${user.max_websites ?? 5}" />
+	        </div>
+	      </div>
+	      <div class="grid-2 grid-2-equal" style="gap:12px">
+	        <div class="form-group">
+	          <label for="maxMessageSizeMB">Max message MB</label>
+	          <input id="maxMessageSizeMB" name="max_message_size_mb" type="number" min="1" step="1" value="${user.max_message_size_mb}" />
+	        </div>
+	        <div class="form-group">
           <label for="maxAttachmentSizeMB">Max attachment MB</label>
           <input id="maxAttachmentSizeMB" name="max_attachment_size_mb" type="number" min="1" step="1" value="${user.max_attachment_size_mb}" />
         </div>
       </div>
-      <div class="grid-2 grid-2-equal" style="gap:12px">
-        <div class="form-group">
-          <label for="maxStorageGB">Max storage GB</label>
-          <input id="maxStorageGB" name="max_storage_gb" type="number" min="1" step="0.1" value="${gb(user.max_storage_bytes)}" />
-        </div>
-        <div class="form-group">
-          <label for="maxWebsites">Max websites</label>
-          <input id="maxWebsites" name="max_websites" type="number" min="0" step="1" value="${user.max_websites ?? 5}" />
-        </div>
-      </div>
+	      <div class="grid-2 grid-2-equal" style="gap:12px">
+	        <div class="form-group">
+	          <label for="maxStorageGB">Max storage GB</label>
+	          <input id="maxStorageGB" name="max_storage_gb" type="number" min="1" step="0.1" value="${gb(user.max_storage_bytes)}" />
+	        </div>
+	      </div>
       <button type="submit" class="btn btn-primary btn-full">Save Quotas</button>
       <p id="userQuotaFormMessage" class="form-message hidden"></p>
     </form>
@@ -2519,17 +3429,19 @@ function openUserQuotaModal(userID) {
     const message = document.getElementById("userQuotaFormMessage");
     const maxStorageGB = Number(form.elements.max_storage_gb.value);
     const payload = {
-      max_domains: Number(form.elements.max_domains.value),
-      max_inboxes: Number(form.elements.max_inboxes.value),
-      max_message_size_mb: Number(form.elements.max_message_size_mb.value),
+	      max_domains: Number(form.elements.max_domains.value),
+	      max_inboxes: Number(form.elements.max_inboxes.value),
+	      max_members: Number(form.elements.max_members.value),
+	      max_message_size_mb: Number(form.elements.max_message_size_mb.value),
       max_attachment_size_mb: Number(form.elements.max_attachment_size_mb.value),
       max_storage_bytes: Math.round(maxStorageGB * 1024 * 1024 * 1024),
       max_websites: Number(form.elements.max_websites.value)
     };
 
     if (
-      payload.max_domains < 0 ||
-      payload.max_inboxes < 0 ||
+	      payload.max_domains < 0 ||
+	      payload.max_inboxes < 0 ||
+	      payload.max_members < 0 ||
       payload.max_message_size_mb < 1 ||
       payload.max_attachment_size_mb < 1 ||
       payload.max_storage_bytes < 1 ||
@@ -3077,11 +3989,29 @@ function wireDomainHandlers(project) {
 }
 
 // --- Settings ---
-function renderSettings() {
-
+async function renderSettings() {
   setView("settings");
 
+  let generalSettings = {
+    saas_domain: "",
+    landing_root: "./landing",
+    saas_domain_mode: "app"
+  };
+  try {
+    generalSettings = await api("/settings/general");
+  } catch (_) { /* settings not available */ }
+
   els.pageContent.innerHTML = `
+    <div style="display:flex;gap:8px;margin-bottom:20px;border-bottom:1px solid var(--color-border);padding-bottom:0">
+      <button class="website-tab active" data-settings-tab="general">General</button>
+      <button class="website-tab" data-settings-tab="session">Session</button>
+    </div>
+
+    <div id="settingsGeneralTab">
+      ${renderGeneralSettingsTab(generalSettings)}
+    </div>
+
+    <div id="settingsSessionTab" class="hidden">
     <div class="grid-2 grid-2-equal">
       <div class="card">
         <div class="card-header">
@@ -3123,7 +4053,71 @@ function renderSettings() {
         </div>
       </div>
     </div>
+
+    </div>
   `;
+
+  els.pageContent.querySelectorAll("[data-settings-tab]").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      els.pageContent.querySelectorAll("[data-settings-tab]").forEach((item) => item.classList.remove("active"));
+      tab.classList.add("active");
+      document.getElementById("settingsGeneralTab").classList.toggle("hidden", tab.dataset.settingsTab !== "general");
+      document.getElementById("settingsSessionTab").classList.toggle("hidden", tab.dataset.settingsTab !== "session");
+    });
+  });
+  wireGeneralSettingsHandlers(generalSettings);
+}
+
+function renderGeneralSettingsTab(settings) {
+  const mode = settings?.saas_domain_mode || "app";
+  const canEdit = Boolean(currentUser?.is_admin);
+  return `
+    <div class="card">
+      <div class="card-header">
+        <h3>SaaS Domain</h3>
+      </div>
+      <div class="card-body">
+        <div class="info-row">
+          <span class="info-row-label">Domain</span>
+          <span class="info-row-value">${escapeHTML(settings?.saas_domain || "-")}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-row-label">Landing folder</span>
+          <span class="info-row-value">${escapeHTML(settings?.landing_root || "./landing")}</span>
+        </div>
+        <div class="form-group" style="margin-top:16px">
+          <label>Root domain behavior</label>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button type="button" class="btn ${mode === "app" ? "btn-primary" : "btn-secondary"} btn-sm saas-mode-btn" data-mode="app" ${canEdit ? "" : "disabled"}>App</button>
+            <button type="button" class="btn ${mode === "landing" ? "btn-primary" : "btn-secondary"} btn-sm saas-mode-btn" data-mode="landing" ${canEdit ? "" : "disabled"}>Landing</button>
+          </div>
+        </div>
+        <p id="generalSettingsMessage" class="form-message hidden"></p>
+      </div>
+    </div>
+  `;
+}
+
+function wireGeneralSettingsHandlers(settings) {
+  if (!currentUser?.is_admin) return;
+  els.pageContent.querySelectorAll(".saas-mode-btn").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const message = document.getElementById("generalSettingsMessage");
+      try {
+        const next = await api("/settings/general", {
+          method: "PATCH",
+          body: JSON.stringify({ saas_domain_mode: button.dataset.mode })
+        });
+        settings.saas_domain_mode = next.saas_domain_mode;
+        document.getElementById("settingsGeneralTab").innerHTML = renderGeneralSettingsTab(next);
+        wireGeneralSettingsHandlers(next);
+        const nextMessage = document.getElementById("generalSettingsMessage");
+        flash(nextMessage, "Saved.", true);
+      } catch (error) {
+        flash(message, error.message, false);
+      }
+    });
+  });
 }
 
 // --- Init ---

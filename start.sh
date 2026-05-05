@@ -53,6 +53,13 @@ export CLAMAV_ADDR="${CLAMAV_ADDR:-clamav:3310}"
 export BLOCK_FLAGGED_ATTACHMENTS="${BLOCK_FLAGGED_ATTACHMENTS:-true}"
 export ALLOW_ADMIN_ATTACHMENT_OVERRIDE="${ALLOW_ADMIN_ATTACHMENT_OVERRIDE:-true}"
 
+redis_host="${REDIS_ADDR%:*}"
+redis_port="${REDIS_ADDR##*:}"
+if [[ "$redis_host" == "$REDIS_ADDR" || -z "$redis_host" || -z "$redis_port" ]]; then
+  echo "REDIS_ADDR must be in host:port format, got: $REDIS_ADDR" >&2
+  exit 1
+fi
+
 port_open() {
   local host="$1"
   local port="$2"
@@ -148,11 +155,11 @@ echo "Preparing dependencies..."
 if ! port_open 127.0.0.1 5432; then
   start_dependency postgres
 fi
-if ! port_open 127.0.0.1 6379; then
+if ! port_open "$redis_host" "$redis_port"; then
   start_dependency redis
 fi
 wait_for_port 127.0.0.1 5432 "Postgres"
-wait_for_port 127.0.0.1 6379 "Redis"
+wait_for_port "$redis_host" "$redis_port" "Redis"
 
 echo "Building binaries..."
 (cd "$ROOT_DIR" && go build -o api ./cmd/api && go build -o smtp ./cmd/smtp)

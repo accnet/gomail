@@ -14,6 +14,7 @@ import (
 	relay "gomail/internal/smtp/relay"
 	smtpserver "gomail/internal/smtp/server"
 	"gomail/internal/storage"
+	"gomail/internal/teams"
 	"gomail/pkg/logger"
 )
 
@@ -29,6 +30,13 @@ func main() {
 		log.Fatal(err)
 	}
 	if err := db.AutoMigrate(database); err != nil {
+		log.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := teams.NewService(database).EnsureDefaultWorkspaces(ctx); err != nil {
 		log.Fatal(err)
 	}
 
@@ -55,9 +63,6 @@ func main() {
 
 	// Create inbound SMTP backend
 	backend := smtpserver.Backend{DB: database, Config: cfg, Pipeline: pipeline, Logger: logg}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	// Count active servers to know how many goroutines to wait for
 	serverCount := 1 // inbound SMTP is always active

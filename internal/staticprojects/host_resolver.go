@@ -36,16 +36,19 @@ func (r *HostResolver) Resolve(host string) (*ResolvedProject, error) {
 	if idx := strings.LastIndex(host, ":"); idx >= 0 {
 		host = host[:idx]
 	}
+	host = normalizeDomainName(host)
 
 	var project ResolvedProject
 
 	// Try 1: Match by assigned custom domain
-	err := r.DB.Table("static_projects").
-		Select("id, root_folder, is_active, status").
-		Where("assigned_domain = ? AND domain_binding_status = ? AND deleted_at IS NULL", host, "ssl_active").
-		Scan(&project).Error
-	if err == nil && project.ID != uuid.Nil {
-		return &project, nil
+	if host != "" && host != normalizeDomainName(r.SaaSDomain) {
+		err := r.DB.Table("static_projects").
+			Select("id, root_folder, is_active, status").
+			Where("assigned_domain = ? AND domain_binding_status = ? AND deleted_at IS NULL", host, "ssl_active").
+			Scan(&project).Error
+		if err == nil && project.ID != uuid.Nil {
+			return &project, nil
+		}
 	}
 
 	// Try 2: Match by subdomain (e.g., "myproject.basedomain.com")
@@ -59,7 +62,7 @@ func (r *HostResolver) Resolve(host string) (*ResolvedProject, error) {
 	if subdomain != "" {
 
 		subdomain = strings.TrimSpace(subdomain)
-		err = r.DB.Table("static_projects").
+		err := r.DB.Table("static_projects").
 			Select("id, root_folder, is_active, status").
 			Where("subdomain = ? AND deleted_at IS NULL", subdomain).
 			Scan(&project).Error
@@ -76,6 +79,7 @@ func (r *HostResolver) IsStaticHost(host string) bool {
 	if idx := strings.LastIndex(host, ":"); idx >= 0 {
 		host = host[:idx]
 	}
+	host = normalizeDomainName(host)
 	if r.BaseDomain != "" && strings.HasSuffix(host, "."+r.BaseDomain) {
 		return true
 	}

@@ -1,12 +1,14 @@
 package handlers
 
 import (
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"gomail/internal/db"
+
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
@@ -14,55 +16,54 @@ import (
 // bound to the SaaS domain. If so, it serves the static site files directly,
 // bypassing the normal web app routing.
 type StaticSiteMiddleware struct {
-	DB         *gorm.DB
-	SaaSDomain string
+	DB          *gorm.DB
+	SaaSDomain  string
+	LandingRoot string
 }
 
-// NewStaticSiteMiddleware creates middleware that intercepts requests for the
-// SaaS domain when a static project is bound to it, and serves the static files.
-func NewStaticSiteMiddleware(database *gorm.DB, saasDomain string) *StaticSiteMiddleware {
-	return &StaticSiteMiddleware{DB: database, SaaSDomain: saasDomain}
+// NewStaticSiteMiddleware creates middleware for the exact SaaS domain.
+func NewStaticSiteMiddleware(database *gorm.DB, saasDomain string, landingRoot string) *StaticSiteMiddleware {
+	return &StaticSiteMiddleware{DB: database, SaaSDomain: saasDomain, LandingRoot: landingRoot}
 }
 
 // Handler returns a Gin middleware that checks for static project bindings.
 func (m *StaticSiteMiddleware) Handler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		host := c.Request.Host
-		// Strip port
 		if idx := strings.LastIndex(host, ":"); idx >= 0 {
 			host = host[:idx]
 		}
+		host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
 
 		// Only intercept if the host IS the SaaS domain itself (exact match).
 		// Subdomains of the SaaS domain are handled by the static-server (nginx default_server).
-		if m.SaaSDomain == "" || host != m.SaaSDomain {
+		saasDomain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(m.SaaSDomain)), ".")
+		if saasDomain == "" || host != saasDomain {
 			c.Next()
 			return
 		}
 
-		// Look for a static project bound to this domain. Unlike HostResolver, we
-		// do NOT require ssl_active — the SaaS domain already has TLS via nginx.
-		var project struct {
-			ID         uuid.UUID
-			RootFolder string
-			IsActive   bool
-			Status     string
-		}
-		err := m.DB.Table("static_projects").
-			Select("id, root_folder, is_active, status").
-			Where("assigned_domain = ? AND domain_binding_status IN ? AND deleted_at IS NULL",
-				host, []string{"assigned", "ssl_active"}).
-			Scan(&project).Error
-
-		if err != nil || project.ID == uuid.Nil || !project.IsActive || project.Status != "published" {
-			// No static project bound → fall through to normal web app.
+		if isAppOrAPIPath(c.Request.URL.Path) {
 			c.Next()
 			return
 		}
 
-		// Serve the static site file.
-		serveStaticProjectFile(c, project.RootFolder)
+		if db.GetSaaSDomainMode(m.DB) == db.SaaSDomainModeLanding {
+			serveStaticProjectFile(c, m.LandingRoot)
+			return
+		}
+
+		c.Redirect(http.StatusFound, "/app/")
+		c.Abort()
 	}
+}
+
+func isAppOrAPIPath(urlPath string) bool {
+	return urlPath == "/healthz" ||
+		urlPath == "/app" ||
+		strings.HasPrefix(urlPath, "/app/") ||
+		urlPath == "/api" ||
+		strings.HasPrefix(urlPath, "/api/")
 }
 
 // serveStaticProjectFile serves a file from the project's root folder.

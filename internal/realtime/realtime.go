@@ -11,9 +11,10 @@ import (
 const Channel = "gomail.events"
 
 type Event struct {
-	Type   string    `json:"type"`
-	UserID uuid.UUID `json:"user_id"`
-	Data   any       `json:"data"`
+	Type   string     `json:"type"`
+	UserID uuid.UUID  `json:"user_id"`
+	TeamID *uuid.UUID `json:"team_id,omitempty"`
+	Data   any        `json:"data"`
 }
 
 type Publisher struct {

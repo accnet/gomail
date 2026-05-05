@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GoMail — Join Team</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <script>
+      (function() {
+        const theme = localStorage.getItem("theme") || "light";
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
+    <link rel="stylesheet" href="/app/styles.css" />
+  </head>
+  <body>
+    <div class="join-page">
+      <div class="auth-card">
+        <h1>Join GoMail Team</h1>
+        <div id="invite-info" class="invite-info">
+          <p>Loading invite...</p>
+        </div>
+
+        <!-- Already logged in -->
+        <div id="logged-in-section" class="hidden">
+          <button id="accept-btn" class="btn btn-primary btn-full">Accept Invite</button>
+          <button id="decline-btn" class="btn btn-ghost btn-full">Decline</button>
+        </div>
+
+        <!-- Not logged in -->
+        <div id="guest-section" class="hidden">
+          <div class="tabs">
+            <button class="tab active" data-tab="login-tab">Login</button>
+            <button class="tab" data-tab="register-tab">Create Account</button>
+          </div>
+
+          <div id="login-tab" class="tab-content">
+            <label>Email <input id="login-email" type="email" readonly /></label>
+            <label>Password <input id="login-password" type="password" autofocus /></label>
+            <button id="login-btn" class="btn btn-primary btn-full">Login & Accept</button>
+            <div id="login-error" class="error hidden"></div>
+          </div>
+
+          <div id="register-tab" class="tab-content hidden">
+            <label>Name <input id="register-name" type="text" /></label>
+            <label>Email <input id="register-email" type="email" readonly /></label>
+            <label>Password <input id="register-password" type="password" minlength="8" /></label>
+            <button id="register-btn" class="btn btn-primary btn-full">Create Account & Join</button>
+            <div id="register-error" class="error hidden"></div>
+          </div>
+        </div>
+
+        <!-- Result -->
+        <div id="result-section" class="hidden">
+          <p id="result-message"></p>
+          <a href="/app/" class="btn btn-primary btn-full">Go to Dashboard</a>
+        </div>
+      </div>
+    </div>
+
+    <script src="/app/join.js"></script>
+  </body>
+</html>
