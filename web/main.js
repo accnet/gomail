@@ -1561,13 +1561,23 @@ async function renderEmailDetail(emailID) {
   state.selectedEmailID = emailID;
   const email = await api(`/emails/${emailID}`);
   let thread = null;
+  let replyStatus = { configured: Boolean(state.outbound?.configured), sender_domain_ready: true };
   try {
     thread = await api(`/emails/${emailID}/thread`);
   } catch (_) {
     thread = null;
   }
+  try {
+    replyStatus = await api(`/emails/${emailID}/reply-status`);
+  } catch (_) {
+    replyStatus = { configured: Boolean(state.outbound?.configured), sender_domain_ready: false, sender_domain_reason: "Could not verify sender domain status" };
+  }
   const container = document.getElementById("emailDetailContainer");
-  const outboundConfigured = Boolean(state.outbound?.configured);
+  const outboundConfigured = Boolean(replyStatus.configured);
+  const senderDomainReady = Boolean(replyStatus.sender_domain_ready);
+  const replyWarning = outboundConfigured
+    ? (senderDomainReady ? "" : (replyStatus.sender_domain_reason || "Sender domain is not ready"))
+    : "Outbound SMTP is not configured";
   const threadItems = thread?.items?.length ? thread.items : [emailToThreadItem(email)];
   const latestItem = threadItems[threadItems.length - 1] || emailToThreadItem(email);
 
@@ -1587,13 +1597,20 @@ async function renderEmailDetail(emailID) {
           <button class="btn btn-secondary btn-sm" data-email-compose="reply">Reply</button>
           <button class="btn btn-secondary btn-sm" data-email-compose="reply_all">Reply all</button>
           <button class="btn btn-ghost btn-sm" data-email-compose="forward">Forward</button>
-          ${outboundConfigured ? "" : `<span class="email-reply-disabled-note">Outbound SMTP is not configured</span>`}
+          ${outboundConfigured && senderDomainReady ? "" : `<span class="email-reply-disabled-note">${escapeHTML(replyWarning)}</span>`}
         </div>
       </div>
 
-      <div class="email-detail-body">
+       <div class="email-detail-body">
+        <div id="inlineReplyMount"></div>
         <div class="gmail-thread">
-          ${threadItems.map((item) => renderThreadMessage(item, email)).join("")}
+          ${(() => {
+            const reversed = [...threadItems].reverse();
+            return reversed.map((item, idx) => {
+              const isNewest = idx === 0;
+              return renderThreadMessage(item, email, isNewest);
+            }).join("");
+          })()}
         </div>
 
         <!-- Attachments -->
@@ -1658,11 +1675,15 @@ async function renderEmailDetail(emailID) {
 
   document.querySelectorAll("[data-email-compose]").forEach((button) => {
     button.onclick = () => {
-      if (!state.outbound?.configured) {
+      if (!outboundConfigured) {
         openSMTPNotConfiguredModal();
         return;
       }
-      openReplyModal(email, button.dataset.emailCompose);
+      if (!replyStatus.sender_domain_ready) {
+        openSenderDomainNotReadyModal(replyStatus);
+        return;
+      }
+      openInlineReplyComposer(email, button.dataset.emailCompose);
     };
   });
 
@@ -1702,26 +1723,70 @@ function emailToThreadItem(email) {
   };
 }
 
-function renderThreadMessage(item, selectedEmail) {
+function renderThreadMessage(item, selectedEmail, isNewest = false) {
   const sender = item.is_outbound ? `You to ${item.to_address || "-"}` : (item.from_address || "Unknown sender");
   const body = item.html_body_sanitized
     ? `<div class="gmail-thread-html">${item.html_body_sanitized}</div>`
     : `<pre class="gmail-thread-plain">${escapeHTML(item.text_body || "")}</pre>`;
+  const snippet = (item.text_body || "").substring(0, 100).trim();
+  const msgId = `thread-msg-${item.id}`;
+
+  if (isNewest) {
+    return `
+      <article class="gmail-thread-message ${item.id === selectedEmail.id ? "active" : ""} ${item.is_outbound ? "outbound" : ""}">
+        <div class="gmail-thread-message-header">
+          <div class="email-detail-avatar gmail-thread-avatar">${initials(sender)}</div>
+          <div class="gmail-thread-meta">
+            <div class="gmail-thread-sender">${escapeHTML(sender)}</div>
+            <div class="gmail-thread-subject">${escapeHTML(item.subject || "(no subject)")}</div>
+          </div>
+          <time class="gmail-thread-time">${relative(item.at)}</time>
+        </div>
+        <div class="gmail-thread-message-body">
+          ${body || `<p class="email-muted">No message body.</p>`}
+        </div>
+      </article>
+    `;
+  }
+
   return `
-    <article class="gmail-thread-message ${item.id === selectedEmail.id ? "active" : ""} ${item.is_outbound ? "outbound" : ""}">
-      <div class="gmail-thread-message-header">
+    <article class="gmail-thread-message gmail-thread-collapsed ${item.is_outbound ? "outbound" : ""}" id="${msgId}" data-thread-id="${item.id}">
+      <div class="gmail-thread-collapsed-header" onclick="document.getElementById('${msgId}').classList.toggle('gmail-thread-expanded')">
         <div class="email-detail-avatar gmail-thread-avatar">${initials(sender)}</div>
         <div class="gmail-thread-meta">
           <div class="gmail-thread-sender">${escapeHTML(sender)}</div>
           <div class="gmail-thread-subject">${escapeHTML(item.subject || "(no subject)")}</div>
         </div>
         <time class="gmail-thread-time">${relative(item.at)}</time>
+        <div class="gmail-thread-expand-icon">
+          <svg class="expand-arrow-down" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          <svg class="expand-arrow-up" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>
+        </div>
       </div>
-      <div class="gmail-thread-message-body">
+      <div class="gmail-thread-collapsed-snippet">${escapeHTML(snippet || "(No preview)")}</div>
+      <div class="gmail-thread-collapsed-body">
         ${body || `<p class="email-muted">No message body.</p>`}
       </div>
     </article>
   `;
+}
+
+function openSenderDomainNotReadyModal(status) {
+  openModal("Sender domain setup required", `
+    <div class="smtp-warning">
+      <p>${escapeHTML(status.sender_domain_reason || "This sender domain is not ready to send outbound email.")}</p>
+      <p>Verify MX, SPF, and DKIM for <strong>${escapeHTML(status.from_address || "this mailbox")}</strong> before sending replies.</p>
+      <div class="smtp-warning-list">
+        <code>MX status: verified</code>
+        <code>SPF status: verified</code>
+        <code>DKIM status: verified</code>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-primary" id="smtpDomainWarningCloseBtn">OK</button>
+      </div>
+    </div>
+  `);
+  document.getElementById("smtpDomainWarningCloseBtn").onclick = closeModal;
 }
 
 function openSMTPNotConfiguredModal() {
@@ -1742,47 +1807,71 @@ function openSMTPNotConfiguredModal() {
   document.getElementById("smtpWarningCloseBtn").onclick = closeModal;
 }
 
-function openReplyModal(email, mode) {
+function openInlineReplyComposer(email, mode) {
   const subject = prefixedSubject(email.subject || "", mode);
   const to = mode === "forward" ? "" : extractEmailAddress(email.from_address || "");
-  const cc = mode === "reply_all" ? removeAddress(email.to_address || "", email.to_address || "") : "";
-  const quote = quotePlainText(email.text_body || htmlToPlainText(email.html_body_sanitized || ""));
-  openModal(mode === "forward" ? "Forward email" : (mode === "reply_all" ? "Reply all" : "Reply"), `
-    <form id="replyForm" class="form-stack">
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-        <div>
-          <label class="form-label">To</label>
-          <input class="input" name="to" value="${escapeHTML(to)}" required>
-        </div>
-        <div>
-          <label class="form-label">Subject</label>
-          <input class="input" name="subject" value="${escapeHTML(subject)}" required>
+  const cc = mode === "reply_all" ? (email.to_address || "") : "";
+  const hasAttachments = email.attachments?.length > 0;
+  const originalText = email.text_body || htmlToPlainText(email.html_body_sanitized || "");
+  const quote = quotePlainText(originalText);
+  const mount = document.getElementById("inlineReplyMount");
+  if (!mount) return;
+  mount.innerHTML = `
+    <form id="replyForm" class="gmail-inline-reply">
+      <div class="gmail-inline-reply-header">
+        <div class="email-detail-avatar gmail-thread-avatar">${initials("You")}</div>
+        <div class="gmail-inline-reply-fields">
+          <div class="gmail-inline-row">
+            <span>To</span>
+            <input name="to" value="${escapeHTML(to)}" required>
+          </div>
+          <div class="gmail-inline-row">
+            <span>Subject</span>
+            <input name="subject" value="${escapeHTML(subject)}" required>
+          </div>
+          <div class="gmail-inline-row compact">
+            <span>Cc</span>
+            <input name="cc" value="${escapeHTML(cc)}" placeholder="Optional">
+            <span>Bcc</span>
+            <input name="bcc" placeholder="Optional">
+          </div>
         </div>
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-        <div>
-          <label class="form-label">Cc</label>
-          <input class="input" name="cc" value="${escapeHTML(cc)}" placeholder="Optional">
-        </div>
-        <div>
-          <label class="form-label">Bcc</label>
-          <input class="input" name="bcc" placeholder="Optional">
-        </div>
-      </div>
-      <label class="form-label">Message</label>
-      <textarea class="textarea" name="body_text">${escapeHTML("\n\n" + quote)}</textarea>
+      <textarea class="gmail-inline-editor" name="message_text" placeholder="Write your reply..."></textarea>
+      ${hasAttachments && mode === "forward" ? `
+      <label class="gmail-inline-attach-check">
+        <input type="checkbox" name="include_attachments" checked>
+        <span>Include ${email.attachments.length} original attachment${email.attachments.length > 1 ? "s" : ""}</span>
+      </label>
+      ` : ""}
+      <details class="gmail-inline-quote">
+        <summary>Quoted text <span class="gmail-inline-quote-lines">(${quote.split('\\n').length} lines)</span></summary>
+        <pre>${escapeHTML(quote)}</pre>
+      </details>
       <div id="replyFormMessage" class="form-message hidden"></div>
-      <div class="form-actions">
-        <button type="button" class="btn btn-ghost" id="cancelReplyBtn">Cancel</button>
-        <button type="submit" class="btn btn-primary">Send Reply</button>
+      <div class="gmail-inline-actions">
+        <button type="submit" class="btn btn-primary">${mode === "forward" ? "Send Forward" : "Send Reply"}</button>
+        <button type="button" class="btn btn-ghost" id="cancelReplyBtn">Discard</button>
       </div>
     </form>
-  `);
-  document.getElementById("cancelReplyBtn").onclick = closeModal;
+  `;
+  mount.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  const editor = mount.querySelector(".gmail-inline-editor");
+  if (editor) editor.focus();
+  document.getElementById("cancelReplyBtn").onclick = () => {
+    mount.innerHTML = "";
+  };
   document.getElementById("replyForm").onsubmit = async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
     const message = document.getElementById("replyFormMessage");
+    const messageText = form.elements.message_text.value.trim();
+    const quotedText = quote ? "\n\n" + quote : "";
+    if (!messageText) {
+      flash(message, "Message is required.", false);
+      form.elements.message_text.focus();
+      return;
+    }
     try {
       await api(`/emails/${email.id}/reply`, {
         method: "POST",
@@ -1792,10 +1881,9 @@ function openReplyModal(email, mode) {
           cc: splitAddresses(form.elements.cc.value),
           bcc: splitAddresses(form.elements.bcc.value),
           subject: form.elements.subject.value,
-          body_text: form.elements.body_text.value
+          body_text: messageText + quotedText
         })
       });
-      closeModal();
       await renderEmailDetail(email.id);
     } catch (error) {
       flash(message, error.message, false);

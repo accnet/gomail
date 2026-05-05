@@ -44,14 +44,18 @@ func (p Pipeline) Ingest(ctx context.Context, inbox db.Inbox, user db.User, from
 	if err != nil {
 		return db.Email{}, err
 	}
+	conversationID := inferConversationID(parsed.MessageID, parsed.InReplyToMessageID, parsed.ReferencesMessageIDs, parsed.Subject)
 	email := db.Email{
-		InboxID:           inbox.ID,
-		MessageID:         parsed.MessageID,
-		FromAddress:       firstNonEmpty(parsed.From, from),
-		ToAddress:         firstNonEmpty(parsed.To, rcpt),
-		Subject:           parsed.Subject,
-		ReceivedAt:        time.Now(),
-		Snippet:           snippet(parsed.Text),
+		InboxID:              inbox.ID,
+		MessageID:            parsed.MessageID,
+		ConversationID:       conversationID,
+		InReplyToMessageID:   parsed.InReplyToMessageID,
+		ReferencesMessageIDs: mustJSON(parsed.ReferencesMessageIDs),
+		FromAddress:          firstNonEmpty(parsed.From, from),
+		ToAddress:            firstNonEmpty(parsed.To, rcpt),
+		Subject:              parsed.Subject,
+		ReceivedAt:           time.Now(),
+		Snippet:              snippet(parsed.Text),
 
 		TextBody:          parsed.Text,
 		HTMLBody:          parsed.HTML,
@@ -61,11 +65,30 @@ func (p Pipeline) Ingest(ctx context.Context, inbox db.Inbox, user db.User, from
 	}
 	var saved []string
 	err = p.DB.Transaction(func(tx *gorm.DB) error {
+		if parsed.InReplyToMessageID != "" {
+			parent, err := resolveParentEmail(tx, user.ID, parsed.InReplyToMessageID)
+			if err != nil {
+				return err
+			}
+			if parent != nil {
+				email.ParentEmailID = &parent.ID
+				if parent.RootEmailID != nil {
+					email.RootEmailID = parent.RootEmailID
+				} else {
+					email.RootEmailID = &parent.ID
+				}
+				if email.ConversationID == "" {
+					email.ConversationID = parent.ConversationID
+				}
+			}
+		}
+		if email.ConversationID == "" {
+			email.ConversationID = fallbackConversationID(email.Subject)
+		}
 		if err := tx.Create(&email).Error; err != nil {
 			return err
 		}
 		var total int64 = int64(len(raw))
-
 
 		for _, part := range parsed.Attachments {
 			if total+part.Size > int64(user.MaxAttachmentSizeMB)*1024*1024+int64(len(raw)) {
@@ -125,14 +148,16 @@ func remove(path string) error {
 }
 
 type parsedMail struct {
-	MessageID   string
-	From        string
-	To          string
-	Subject     string
-	Text        string
-	HTML        string
-	Headers     map[string][]string
-	Attachments []parsedAttachment
+	MessageID            string
+	InReplyToMessageID   string
+	ReferencesMessageIDs []string
+	From                 string
+	To                   string
+	Subject              string
+	Text                 string
+	HTML                 string
+	Headers              map[string][]string
+	Attachments          []parsedAttachment
 }
 
 type parsedAttachment struct {
@@ -150,11 +175,13 @@ func parse(raw []byte) (parsedMail, error) {
 		return parsedMail{}, err
 	}
 	out := parsedMail{
-		MessageID: strings.TrimSpace(msg.Header.Get("Message-ID")),
-		From:      msg.Header.Get("From"),
-		To:        msg.Header.Get("To"),
-		Subject:   msg.Header.Get("Subject"),
-		Headers:   map[string][]string(msg.Header),
+		MessageID:            normalizeMessageID(msg.Header.Get("Message-ID")),
+		InReplyToMessageID:   firstMessageID(msg.Header.Get("In-Reply-To")),
+		ReferencesMessageIDs: parseMessageIDList(msg.Header.Get("References")),
+		From:                 msg.Header.Get("From"),
+		To:                   msg.Header.Get("To"),
+		Subject:              msg.Header.Get("Subject"),
+		Headers:              map[string][]string(msg.Header),
 	}
 	ct := msg.Header.Get("Content-Type")
 	mediaType, params, _ := mime.ParseMediaType(ct)
@@ -167,6 +194,96 @@ func parse(raw []byte) (parsedMail, error) {
 		out.Text = string(body)
 	}
 	return out, nil
+}
+
+func resolveParentEmail(tx *gorm.DB, userID uuid.UUID, inReplyTo string) (*db.Email, error) {
+	normalized := normalizeMessageID(inReplyTo)
+	if normalized == "" {
+		return nil, nil
+	}
+	candidates := []string{normalized, "<" + normalized + ">"}
+	var parent db.Email
+	err := tx.Joins("JOIN inboxes ON inboxes.id = emails.inbox_id").
+		Where("inboxes.user_id = ? AND emails.message_id IN ?", userID, candidates).
+		Order("emails.received_at DESC").
+		First(&parent).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &parent, nil
+}
+
+func inferConversationID(messageID, inReplyTo string, references []string, subject string) string {
+	if len(references) > 0 && references[0] != "" {
+		return references[0]
+	}
+	if inReplyTo != "" {
+		return inReplyTo
+	}
+	if messageID != "" {
+		return messageID
+	}
+	return fallbackConversationID(subject)
+}
+
+func normalizeMessageID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	value = strings.Trim(value, "<>")
+	value = strings.TrimSpace(value)
+	return strings.ToLower(value)
+}
+
+func firstMessageID(value string) string {
+	ids := parseMessageIDList(value)
+	if len(ids) == 0 {
+		return ""
+	}
+	return ids[0]
+}
+
+func parseMessageIDList(value string) []string {
+	fields := strings.Fields(value)
+	ids := make([]string, 0, len(fields))
+	seen := map[string]struct{}{}
+	for _, field := range fields {
+		id := normalizeMessageID(field)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		id := normalizeMessageID(value)
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func fallbackConversationID(subject string) string {
+	subject = strings.ToLower(strings.TrimSpace(subject))
+	for {
+		next := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(subject, "re:"), "fwd:"))
+		if next == subject {
+			break
+		}
+		subject = next
+	}
+	if subject == "" {
+		return "missing-message-id"
+	}
+	return "subject:" + subject
 }
 
 func parseMultipart(out *parsedMail, boundary string, body []byte) {

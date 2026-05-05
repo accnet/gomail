@@ -15,6 +15,7 @@ import (
 	"gomail/internal/config"
 	"gomail/internal/db"
 	"gomail/internal/dns"
+	"gomail/internal/mail/outbound"
 
 	"github.com/google/uuid"
 	"gorm.io/driver/sqlite"
@@ -88,6 +89,23 @@ func createUser(t *testing.T, database *gorm.DB, email string, active bool, admi
 		t.Fatal(err)
 	}
 	return user
+}
+
+func createVerifiedDomainEmailAuth(t *testing.T, database *gorm.DB, domain db.Domain) {
+	t.Helper()
+	authRow := db.DomainEmailAuth{
+		DomainID:        domain.ID,
+		SPFStatus:       db.DomainAuthStatusVerified,
+		SPFRecord:       "v=spf1 a mx -all",
+		DKIMSelector:    "gomail",
+		DKIMPublicKey:   "test-public-key",
+		DKIMStatus:      db.DomainAuthStatusVerified,
+		DKIMRecordName:  "gomail._domainkey." + domain.Name,
+		DKIMRecordValue: "v=DKIM1; k=rsa; p=test",
+	}
+	if err := database.Create(&authRow).Error; err != nil {
+		t.Fatal(err)
+	}
 }
 
 func bearerToken(t *testing.T, app App, user db.User) string {
@@ -173,6 +191,459 @@ func TestEventsStreamAcceptsQueryToken(t *testing.T) {
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("events stream status = %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestReplyEmailPersistsSentLogAndThread(t *testing.T) {
+	app, database := newTestApp(t)
+	user := createUser(t, database, "reply@test.local", true, false, false)
+	domain := db.Domain{UserID: user.ID, Name: "reply.test", Status: db.DomainStatusVerified}
+	if err := database.Create(&domain).Error; err != nil {
+		t.Fatal(err)
+	}
+	createVerifiedDomainEmailAuth(t, database, domain)
+	inbox := db.Inbox{UserID: user.ID, DomainID: domain.ID, LocalPart: "hello", Address: "hello@reply.test", IsActive: true}
+	if err := database.Create(&inbox).Error; err != nil {
+		t.Fatal(err)
+	}
+	email := db.Email{
+		InboxID:        inbox.ID,
+		MessageID:      "original@example.net",
+		ConversationID: "original@example.net",
+		FromAddress:    "sender@example.net",
+		ToAddress:      inbox.Address,
+		Subject:        "Question",
+		TextBody:       "Original body",
+		ReceivedAt:     time.Now().Add(-time.Minute),
+	}
+	if err := database.Create(&email).Error; err != nil {
+		t.Fatal(err)
+	}
+	var captured outbound.Message
+	app.SendOutbound = func(userID uuid.UUID, msg outbound.Message, sentLog db.SentEmailLog) error {
+		captured = msg
+		sentLog.UserID = userID
+		sentLog.FromAddress = msg.From
+		sentLog.ToAddress = strings.Join(msg.To, ",")
+		sentLog.Subject = msg.Subject
+		sentLog.BodyText = msg.TextBody
+		sentLog.Status = db.SentEmailStatusSent
+		now := time.Now()
+		sentLog.SentAt = &now
+		return database.Create(&sentLog).Error
+	}
+	router := app.Router()
+	token := bearerToken(t, app, user)
+	replyResp := doJSON(t, router, http.MethodPost, "/api/emails/"+email.ID.String()+"/reply", map[string]any{
+		"mode":      "reply",
+		"body_text": "Thanks",
+	}, token)
+	if replyResp.Code != http.StatusOK {
+		t.Fatalf("reply status = %d body=%s", replyResp.Code, replyResp.Body.String())
+	}
+	if captured.From != inbox.Address || strings.Join(captured.To, ",") != "sender@example.net" {
+		t.Fatalf("unexpected captured message: %+v", captured)
+	}
+	if captured.Headers["In-Reply-To"] != "<original@example.net>" {
+		t.Fatalf("missing in-reply-to header: %+v", captured.Headers)
+	}
+
+	threadResp := doJSON(t, router, http.MethodGet, "/api/emails/"+email.ID.String()+"/thread", nil, token)
+	if threadResp.Code != http.StatusOK {
+		t.Fatalf("thread status = %d body=%s", threadResp.Code, threadResp.Body.String())
+	}
+	var threadBody struct {
+		ConversationID string `json:"conversation_id"`
+		Items          []struct {
+			IsOutbound bool   `json:"is_outbound"`
+			Subject    string `json:"subject"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(threadResp.Body.Bytes(), &threadBody); err != nil {
+		t.Fatal(err)
+	}
+	if threadBody.ConversationID != email.ConversationID || len(threadBody.Items) != 2 || !threadBody.Items[1].IsOutbound {
+		t.Fatalf("unexpected thread body: %+v", threadBody)
+	}
+}
+
+func TestReplyEmailNormalizesBracketedOriginalMessageID(t *testing.T) {
+	app, database := newTestApp(t)
+	user := createUser(t, database, "reply-bracket@test.local", true, false, false)
+	domain := db.Domain{UserID: user.ID, Name: "replybracket.test", Status: db.DomainStatusVerified}
+	if err := database.Create(&domain).Error; err != nil {
+		t.Fatal(err)
+	}
+	createVerifiedDomainEmailAuth(t, database, domain)
+	inbox := db.Inbox{UserID: user.ID, DomainID: domain.ID, LocalPart: "hello", Address: "hello@replybracket.test", IsActive: true}
+	if err := database.Create(&inbox).Error; err != nil {
+		t.Fatal(err)
+	}
+	email := db.Email{
+		InboxID:        inbox.ID,
+		MessageID:      "<original-bracket@example.net>",
+		ConversationID: "<original-bracket@example.net>",
+		FromAddress:    "sender@example.net",
+		ToAddress:      inbox.Address,
+		Subject:        "Question",
+		ReceivedAt:     time.Now(),
+	}
+	if err := database.Create(&email).Error; err != nil {
+		t.Fatal(err)
+	}
+	var captured outbound.Message
+	app.SendOutbound = func(userID uuid.UUID, msg outbound.Message, sentLog db.SentEmailLog) error {
+		captured = msg
+		sentLog.UserID = userID
+		sentLog.Status = db.SentEmailStatusSent
+		return database.Create(&sentLog).Error
+	}
+	router := app.Router()
+	token := bearerToken(t, app, user)
+	resp := doJSON(t, router, http.MethodPost, "/api/emails/"+email.ID.String()+"/reply", map[string]any{
+		"mode":      "reply",
+		"body_text": "Thanks",
+	}, token)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("reply status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	if captured.Headers["In-Reply-To"] != "<original-bracket@example.net>" {
+		t.Fatalf("in-reply-to = %q", captured.Headers["In-Reply-To"])
+	}
+	if captured.Headers["References"] != "<original-bracket@example.net>" {
+		t.Fatalf("references = %q", captured.Headers["References"])
+	}
+}
+
+func TestReplyEmailFailsWhenSenderNotConfigured(t *testing.T) {
+	app, database := newTestApp(t)
+	user := createUser(t, database, "no-reply@test.local", true, false, false)
+	domain := db.Domain{UserID: user.ID, Name: "nosmtp.test", Status: db.DomainStatusVerified}
+	if err := database.Create(&domain).Error; err != nil {
+		t.Fatal(err)
+	}
+	inbox := db.Inbox{UserID: user.ID, DomainID: domain.ID, LocalPart: "hello", Address: "hello@nosmtp.test", IsActive: true}
+	if err := database.Create(&inbox).Error; err != nil {
+		t.Fatal(err)
+	}
+	email := db.Email{
+		InboxID:        inbox.ID,
+		MessageID:      "no-smtp@example.net",
+		ConversationID: "no-smtp@example.net",
+		FromAddress:    "sender@example.net",
+		ToAddress:      inbox.Address,
+		Subject:        "Question",
+		ReceivedAt:     time.Now(),
+	}
+	if err := database.Create(&email).Error; err != nil {
+		t.Fatal(err)
+	}
+	router := app.Router()
+	token := bearerToken(t, app, user)
+	resp := doJSON(t, router, http.MethodPost, "/api/emails/"+email.ID.String()+"/reply", map[string]any{
+		"mode":      "reply",
+		"body_text": "Thanks",
+	}, token)
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("reply status = %d body=%s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestReplyEmailWarnsWhenSenderDomainEmailAuthNotVerified(t *testing.T) {
+	app, database := newTestApp(t)
+	app.SendOutbound = func(userID uuid.UUID, msg outbound.Message, sentLog db.SentEmailLog) error {
+		t.Fatal("sender should not be called")
+		return nil
+	}
+	user := createUser(t, database, "domain-not-ready@test.local", true, false, false)
+	domain := db.Domain{UserID: user.ID, Name: "notready.test", Status: db.DomainStatusVerified}
+	if err := database.Create(&domain).Error; err != nil {
+		t.Fatal(err)
+	}
+	authRow := db.DomainEmailAuth{
+		DomainID:     domain.ID,
+		SPFStatus:    db.DomainAuthStatusPending,
+		DKIMSelector: "gomail",
+		DKIMStatus:   db.DomainAuthStatusPending,
+	}
+	if err := database.Create(&authRow).Error; err != nil {
+		t.Fatal(err)
+	}
+	inbox := db.Inbox{UserID: user.ID, DomainID: domain.ID, LocalPart: "hello", Address: "hello@notready.test", IsActive: true}
+	if err := database.Create(&inbox).Error; err != nil {
+		t.Fatal(err)
+	}
+	email := db.Email{
+		InboxID:        inbox.ID,
+		MessageID:      "notready@example.net",
+		ConversationID: "notready@example.net",
+		FromAddress:    "sender@example.net",
+		ToAddress:      inbox.Address,
+		Subject:        "Question",
+		ReceivedAt:     time.Now(),
+	}
+	if err := database.Create(&email).Error; err != nil {
+		t.Fatal(err)
+	}
+	router := app.Router()
+	token := bearerToken(t, app, user)
+	statusResp := doJSON(t, router, http.MethodGet, "/api/emails/"+email.ID.String()+"/reply-status", nil, token)
+	if statusResp.Code != http.StatusOK {
+		t.Fatalf("reply-status = %d body=%s", statusResp.Code, statusResp.Body.String())
+	}
+	var statusBody struct {
+		Configured         bool   `json:"configured"`
+		SenderDomainReady  bool   `json:"sender_domain_ready"`
+		SenderDomainReason string `json:"sender_domain_reason"`
+	}
+	if err := json.Unmarshal(statusResp.Body.Bytes(), &statusBody); err != nil {
+		t.Fatal(err)
+	}
+	if !statusBody.Configured || statusBody.SenderDomainReady || !strings.Contains(statusBody.SenderDomainReason, "SPF and DKIM") {
+		t.Fatalf("unexpected reply status: %+v", statusBody)
+	}
+	replyResp := doJSON(t, router, http.MethodPost, "/api/emails/"+email.ID.String()+"/reply", map[string]any{
+		"mode":      "reply",
+		"body_text": "Thanks",
+	}, token)
+	if replyResp.Code != http.StatusForbidden {
+		t.Fatalf("reply status = %d body=%s", replyResp.Code, replyResp.Body.String())
+	}
+}
+
+func TestOutboundStatusReflectsSenderConfiguration(t *testing.T) {
+	app, _ := newTestApp(t)
+	user := createUser(t, app.DB, "outbound-status@test.local", true, false, false)
+	router := app.Router()
+	token := bearerToken(t, app, user)
+	resp := doJSON(t, router, http.MethodGet, "/api/outbound/status", nil, token)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	var body struct {
+		Configured bool `json:"configured"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Configured {
+		t.Fatal("expected outbound to be unconfigured")
+	}
+
+	app.SendOutbound = func(userID uuid.UUID, msg outbound.Message, sentLog db.SentEmailLog) error {
+		return nil
+	}
+	router = app.Router()
+	resp = doJSON(t, router, http.MethodGet, "/api/outbound/status", nil, token)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("configured status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Configured {
+		t.Fatal("expected outbound to be configured")
+	}
+}
+
+func TestListConversationsGroupsInboundAndSentMessages(t *testing.T) {
+	app, database := newTestApp(t)
+	user := createUser(t, database, "conversations@test.local", true, false, false)
+	domain := db.Domain{UserID: user.ID, Name: "conversations.test", Status: db.DomainStatusVerified}
+	if err := database.Create(&domain).Error; err != nil {
+		t.Fatal(err)
+	}
+	inbox := db.Inbox{UserID: user.ID, DomainID: domain.ID, LocalPart: "hello", Address: "hello@conversations.test", IsActive: true}
+	if err := database.Create(&inbox).Error; err != nil {
+		t.Fatal(err)
+	}
+	conversationID := "thread@example.net"
+	first := db.Email{
+		InboxID:        inbox.ID,
+		MessageID:      "first@example.net",
+		ConversationID: conversationID,
+		FromAddress:    "sender@example.net",
+		ToAddress:      inbox.Address,
+		Subject:        "Question",
+		Snippet:        "first",
+		ReceivedAt:     time.Now().Add(-3 * time.Minute),
+		IsRead:         false,
+	}
+	second := db.Email{
+		InboxID:        inbox.ID,
+		MessageID:      "second@example.net",
+		ConversationID: conversationID,
+		FromAddress:    "sender@example.net",
+		ToAddress:      inbox.Address,
+		Subject:        "Re: Question",
+		Snippet:        "second",
+		ReceivedAt:     time.Now().Add(-2 * time.Minute),
+		IsRead:         true,
+	}
+	if err := database.Create(&first).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Create(&second).Error; err != nil {
+		t.Fatal(err)
+	}
+	sentAt := time.Now().Add(-time.Minute)
+	sent := db.SentEmailLog{
+		UserID:         user.ID,
+		ConversationID: conversationID,
+		Mode:           "reply",
+		FromAddress:    inbox.Address,
+		ToAddress:      "sender@example.net",
+		Subject:        "Re: Question",
+		BodyText:       "latest sent",
+		Status:         db.SentEmailStatusSent,
+		SentAt:         &sentAt,
+	}
+	if err := database.Create(&sent).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	router := app.Router()
+	token := bearerToken(t, app, user)
+	resp := doJSON(t, router, http.MethodGet, "/api/conversations?page=1&page_size=25", nil, token)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("conversations status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	var body struct {
+		Items []struct {
+			ConversationID string `json:"conversation_id"`
+			PrimaryEmailID string `json:"primary_email_id"`
+			Count          int    `json:"count"`
+			UnreadCount    int    `json:"unread_count"`
+			Snippet        string `json:"snippet"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Items) != 1 {
+		t.Fatalf("items = %+v", body.Items)
+	}
+	got := body.Items[0]
+	if got.ConversationID != conversationID || got.PrimaryEmailID != second.ID.String() || got.Count != 3 || got.UnreadCount != 1 || got.Snippet != "latest sent" {
+		t.Fatalf("unexpected conversation: %+v", got)
+	}
+}
+
+func TestReplyAllNormalizesRecipients(t *testing.T) {
+	app, database := newTestApp(t)
+	user := createUser(t, database, "reply-all@test.local", true, false, false)
+	domain := db.Domain{UserID: user.ID, Name: "replyall.test", Status: db.DomainStatusVerified}
+	if err := database.Create(&domain).Error; err != nil {
+		t.Fatal(err)
+	}
+	createVerifiedDomainEmailAuth(t, database, domain)
+	inbox := db.Inbox{UserID: user.ID, DomainID: domain.ID, LocalPart: "hello", Address: "hello@replyall.test", IsActive: true}
+	if err := database.Create(&inbox).Error; err != nil {
+		t.Fatal(err)
+	}
+	email := db.Email{
+		InboxID:        inbox.ID,
+		MessageID:      "reply-all@example.net",
+		ConversationID: "reply-all@example.net",
+		FromAddress:    "Sender <sender@example.net>",
+		ToAddress:      "hello@replyall.test, peer@example.net",
+		Subject:        "Team question",
+		ReceivedAt:     time.Now(),
+	}
+	if err := database.Create(&email).Error; err != nil {
+		t.Fatal(err)
+	}
+	var captured outbound.Message
+	app.SendOutbound = func(userID uuid.UUID, msg outbound.Message, sentLog db.SentEmailLog) error {
+		captured = msg
+		sentLog.UserID = userID
+		sentLog.FromAddress = msg.From
+		sentLog.ToAddress = strings.Join(msg.To, ",")
+		sentLog.CcAddress = strings.Join(msg.Cc, ",")
+		sentLog.Subject = msg.Subject
+		sentLog.Status = db.SentEmailStatusSent
+		now := time.Now()
+		sentLog.SentAt = &now
+		return database.Create(&sentLog).Error
+	}
+	router := app.Router()
+	token := bearerToken(t, app, user)
+	resp := doJSON(t, router, http.MethodPost, "/api/emails/"+email.ID.String()+"/reply", map[string]any{
+		"mode":      "reply_all",
+		"body_text": "Thanks all",
+	}, token)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("reply-all status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	if strings.Join(captured.To, ",") != "sender@example.net" {
+		t.Fatalf("to = %v", captured.To)
+	}
+	if strings.Join(captured.Cc, ",") != "peer@example.net" {
+		t.Fatalf("cc = %v", captured.Cc)
+	}
+}
+
+func TestForwardStartsNewConversationWithoutReplyHeaders(t *testing.T) {
+	app, database := newTestApp(t)
+	user := createUser(t, database, "forward@test.local", true, false, false)
+	domain := db.Domain{UserID: user.ID, Name: "forward.test", Status: db.DomainStatusVerified}
+	if err := database.Create(&domain).Error; err != nil {
+		t.Fatal(err)
+	}
+	createVerifiedDomainEmailAuth(t, database, domain)
+	inbox := db.Inbox{UserID: user.ID, DomainID: domain.ID, LocalPart: "hello", Address: "hello@forward.test", IsActive: true}
+	if err := database.Create(&inbox).Error; err != nil {
+		t.Fatal(err)
+	}
+	email := db.Email{
+		InboxID:        inbox.ID,
+		MessageID:      "forward-source@example.net",
+		ConversationID: "forward-source@example.net",
+		FromAddress:    "sender@example.net",
+		ToAddress:      inbox.Address,
+		Subject:        "Original",
+		TextBody:       "Original body",
+		ReceivedAt:     time.Now(),
+	}
+	if err := database.Create(&email).Error; err != nil {
+		t.Fatal(err)
+	}
+	var captured outbound.Message
+	var saved db.SentEmailLog
+	app.SendOutbound = func(userID uuid.UUID, msg outbound.Message, sentLog db.SentEmailLog) error {
+		captured = msg
+		sentLog.UserID = userID
+		sentLog.FromAddress = msg.From
+		sentLog.ToAddress = strings.Join(msg.To, ",")
+		sentLog.Subject = msg.Subject
+		sentLog.BodyText = msg.TextBody
+		sentLog.Status = db.SentEmailStatusSent
+		now := time.Now()
+		sentLog.SentAt = &now
+		if err := database.Create(&sentLog).Error; err != nil {
+			return err
+		}
+		saved = sentLog
+		return nil
+	}
+	router := app.Router()
+	token := bearerToken(t, app, user)
+	resp := doJSON(t, router, http.MethodPost, "/api/emails/"+email.ID.String()+"/reply", map[string]any{
+		"mode":      "forward",
+		"to":        []string{"friend@example.net"},
+		"body_text": "FYI",
+	}, token)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("forward status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	if captured.Headers["In-Reply-To"] != "" || captured.Headers["References"] != "" {
+		t.Fatalf("forward should not carry reply headers: %+v", captured.Headers)
+	}
+	if saved.ConversationID == "" || saved.ConversationID == email.ConversationID {
+		t.Fatalf("forward conversation id = %q", saved.ConversationID)
+	}
+	if saved.InReplyToMessageID != "" {
+		t.Fatalf("forward in-reply-to = %q", saved.InReplyToMessageID)
 	}
 }
 

@@ -236,6 +236,15 @@ func (c Config) Validate() error {
 	return nil
 }
 
+func (c Config) OutboundSMTPConfigured() bool {
+	if strings.EqualFold(strings.TrimSpace(c.OutboundMode), "relay") {
+		return strings.TrimSpace(c.OutboundRelayHost) != ""
+	}
+	return c.SMTPAuthEnabled ||
+		strings.TrimSpace(c.SMTPRelayHostname) != "" ||
+		strings.TrimSpace(c.SMTPRelayPublicIP) != ""
+}
+
 func env(key, fallback string) string {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		return v

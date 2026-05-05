@@ -18,14 +18,13 @@ type Local struct {
 	AttachmentRoot string
 }
 
-func NewLocal(attachmentRoot string) *Local {
+func NewLocal(attachmentRoot string, _ ...string) *Local {
 	return &Local{AttachmentRoot: attachmentRoot}
 }
 
 func (s *Local) Ensure() error {
 	return os.MkdirAll(s.AttachmentRoot, 0o755)
 }
-
 
 func (s *Local) SaveAttachment(userID, emailID, attachmentID uuid.UUID, filename string, r io.Reader) (path string, sha string, size int64, sniffed string, err error) {
 	dir := filepath.Join(s.AttachmentRoot, userID.String(), emailID.String())

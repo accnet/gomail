@@ -2,8 +2,10 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"gomail/internal/config"
@@ -33,6 +35,17 @@ func Open(databaseURL string) (*gorm.DB, error) {
 }
 
 func AutoMigrate(database *gorm.DB) error {
+	return database.Transaction(func(tx *gorm.DB) error {
+		if tx.Dialector.Name() == "postgres" {
+			if err := tx.Exec("SELECT pg_advisory_xact_lock(8217600042)").Error; err != nil {
+				return err
+			}
+		}
+		return autoMigrateLocked(tx)
+	})
+}
+
+func autoMigrateLocked(database *gorm.DB) error {
 	if err := database.AutoMigrate(
 		&User{},
 		&RefreshToken{},
@@ -73,7 +86,198 @@ func AutoMigrate(database *gorm.DB) error {
 			return err
 		}
 	}
+	if err := ensureThreadingSchema(database); err != nil {
+		return err
+	}
+	return BackfillEmailThreading(database, 500)
+}
+
+func ensureThreadingSchema(database *gorm.DB) error {
+	dialect := database.Dialector.Name()
+	uuidType := "TEXT"
+	jsonType := "JSON"
+	if dialect == "postgres" {
+		uuidType = "UUID"
+		jsonType = "JSONB"
+	}
+	columns := []struct {
+		table string
+		name  string
+		typ   string
+	}{
+		{"emails", "conversation_id", "VARCHAR"},
+		{"emails", "root_email_id", uuidType},
+		{"emails", "parent_email_id", uuidType},
+		{"emails", "in_reply_to_message_id", "VARCHAR"},
+		{"emails", "references_message_ids", jsonType},
+		{"sent_email_logs", "original_email_id", uuidType},
+		{"sent_email_logs", "parent_email_id", uuidType},
+		{"sent_email_logs", "conversation_id", "VARCHAR"},
+		{"sent_email_logs", "mode", "VARCHAR"},
+		{"sent_email_logs", "in_reply_to_message_id", "VARCHAR"},
+		{"sent_email_logs", "references_message_ids", jsonType},
+	}
+	for _, col := range columns {
+		if dialect == "postgres" {
+			if err := database.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s", col.table, col.name, col.typ)).Error; err != nil {
+				return err
+			}
+			continue
+		}
+		if database.Migrator().HasColumn(col.table, col.name) {
+			continue
+		}
+		if err := database.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", col.table, col.name, col.typ)).Error; err != nil {
+			return err
+		}
+	}
+	indexes := []struct {
+		table   string
+		name    string
+		columns string
+	}{
+		{"emails", "idx_emails_conversation_id", "conversation_id"},
+		{"emails", "idx_emails_root_email_id", "root_email_id"},
+		{"emails", "idx_emails_parent_email_id", "parent_email_id"},
+		{"emails", "idx_emails_in_reply_to_message_id", "in_reply_to_message_id"},
+		{"emails", "idx_emails_inbox_message_id", "inbox_id, message_id"},
+		{"sent_email_logs", "idx_sent_email_logs_original_email_id", "original_email_id"},
+		{"sent_email_logs", "idx_sent_email_logs_parent_email_id", "parent_email_id"},
+		{"sent_email_logs", "idx_sent_email_logs_conversation_id", "conversation_id"},
+		{"sent_email_logs", "idx_sent_email_logs_mode", "mode"},
+		{"sent_email_logs", "idx_sent_email_logs_in_reply_to_message_id", "in_reply_to_message_id"},
+	}
+	for _, idx := range indexes {
+		stmt := fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s (%s)", idx.name, idx.table, idx.columns)
+		if err := database.Exec(stmt).Error; err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func BackfillEmailThreading(database *gorm.DB, batchSize int) error {
+	if batchSize <= 0 {
+		batchSize = 500
+	}
+	var rows []Email
+	if err := database.Where("conversation_id = '' OR conversation_id IS NULL").Order("received_at ASC").Limit(batchSize).Find(&rows).Error; err != nil {
+		return err
+	}
+	for len(rows) > 0 {
+		for _, row := range rows {
+			inReplyTo, refs := threadingFromHeaders(row.HeadersJSON)
+			messageID := normalizeThreadMessageID(row.MessageID)
+			conversationID := inferBackfillConversationID(messageID, inReplyTo, refs, row.Subject)
+			updates := map[string]any{
+				"message_id":             messageID,
+				"conversation_id":        conversationID,
+				"in_reply_to_message_id": inReplyTo,
+				"references_message_ids": datatypes.JSON(mustMarshalJSON(refs)),
+			}
+			if inReplyTo != "" {
+				var parent Email
+				err := database.Joins("JOIN inboxes child_inbox ON child_inbox.id = ? JOIN inboxes parent_inbox ON parent_inbox.id = emails.inbox_id", row.InboxID).
+					Where("parent_inbox.user_id = child_inbox.user_id AND emails.message_id IN ?", []string{inReplyTo, "<" + inReplyTo + ">"}).
+					Order("emails.received_at DESC").
+					First(&parent).Error
+				if err == nil {
+					updates["parent_email_id"] = parent.ID
+					if parent.RootEmailID != nil {
+						updates["root_email_id"] = *parent.RootEmailID
+					} else {
+						updates["root_email_id"] = parent.ID
+					}
+					if parent.ConversationID != "" && len(refs) == 0 {
+						updates["conversation_id"] = parent.ConversationID
+					}
+				} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+					return err
+				}
+			}
+			if err := database.Model(&Email{}).Where("id = ?", row.ID).Updates(updates).Error; err != nil {
+				return err
+			}
+		}
+		rows = rows[:0]
+		if err := database.Where("conversation_id = '' OR conversation_id IS NULL").Order("received_at ASC").Limit(batchSize).Find(&rows).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func threadingFromHeaders(raw datatypes.JSON) (string, []string) {
+	headers := map[string][]string{}
+	_ = json.Unmarshal(raw, &headers)
+	get := func(name string) string {
+		for key, values := range headers {
+			if strings.EqualFold(key, name) && len(values) > 0 {
+				return values[0]
+			}
+		}
+		return ""
+	}
+	return firstThreadMessageID(get("In-Reply-To")), parseThreadMessageIDList(get("References"))
+}
+
+func inferBackfillConversationID(messageID, inReplyTo string, refs []string, subject string) string {
+	if len(refs) > 0 {
+		return refs[0]
+	}
+	if inReplyTo != "" {
+		return inReplyTo
+	}
+	if messageID != "" {
+		return messageID
+	}
+	subject = strings.ToLower(strings.TrimSpace(subject))
+	if subject == "" {
+		return "missing-message-id"
+	}
+	return "subject:" + subject
+}
+
+func firstThreadMessageID(value string) string {
+	ids := parseThreadMessageIDList(value)
+	if len(ids) == 0 {
+		return ""
+	}
+	return ids[0]
+}
+
+func parseThreadMessageIDList(value string) []string {
+	fields := strings.Fields(value)
+	out := make([]string, 0, len(fields))
+	seen := map[string]struct{}{}
+	for _, field := range fields {
+		id := normalizeThreadMessageID(field)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	if len(out) == 0 {
+		if id := normalizeThreadMessageID(value); id != "" {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+func normalizeThreadMessageID(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, "<>")
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func mustMarshalJSON(v any) []byte {
+	b, _ := json.Marshal(v)
+	return b
 }
 
 func SeedSuperAdmin(ctx context.Context, database *gorm.DB, cfg config.Config) error {
@@ -185,7 +389,6 @@ func SeedDemoData(ctx context.Context, database *gorm.DB, cfg config.Config) err
 
 	emails := []Email{
 		demoEmail(inboxes[0].ID, "<demo-welcome@gomail.local>", "team@gomail.local", "hello@site1.localhost", "Welcome to GoMail", "Your verified domain is ready to receive inbound email.", "Your verified domain is ready. You can create more addresses from the Email tab.", now.Add(-35*time.Minute), false),
-		demoEmail(inboxes[0].ID, "<demo-dns@gomail.local>", "dns-check@gomail.local", "hello@site1.localhost", "DNS verification complete", "MX record is pointing to your GoMail server.", "MX verification succeeded for site1.localhost.", now.Add(-2*time.Hour), true),
 		demoEmail(inboxes[1].ID, "<demo-support@gomail.local>", "customer@example.net", "support@site2.localhost", "Question about inbound routing", "Can you confirm this mailbox receives support tickets?", "Can you confirm this mailbox receives support tickets from external senders?", now.Add(-5*time.Hour), false),
 		demoEmail(inboxes[1].ID, "<demo-report@gomail.local>", "reports@example.net", "support@site2.localhost", "Daily delivery summary", "All test messages were accepted successfully.", "All test messages were accepted successfully. No blocked attachments were found.", now.Add(-26*time.Hour), true),
 	}

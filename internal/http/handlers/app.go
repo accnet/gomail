@@ -10,6 +10,7 @@ import (
 	"net/mail"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"gomail/internal/db"
 	"gomail/internal/dns"
 	mw "gomail/internal/http/middleware"
+	"gomail/internal/mail/outbound"
 	"gomail/internal/realtime"
 	"gomail/pkg/response"
 
@@ -36,6 +38,7 @@ type App struct {
 	Verifier       dns.Verifier
 	StaticProjects *StaticProjectsHandler
 	SendEmail      func(to, from, subject, body string) error
+	SendOutbound   func(userID uuid.UUID, msg outbound.Message, log db.SentEmailLog) error
 	RateLimiter    *mw.RateLimiter
 }
 
@@ -80,12 +83,17 @@ func (a App) Router() *gin.Engine {
 	protected.POST("/inboxes", a.createInbox)
 	protected.PATCH("/inboxes/:id", a.patchInbox)
 	protected.DELETE("/inboxes/:id", a.deleteInbox)
+	protected.GET("/conversations", a.listConversations)
 	protected.GET("/emails", a.listEmails)
 	protected.GET("/emails/:id", a.getEmail)
+	protected.GET("/emails/:id/thread", a.getEmailThread)
+	protected.GET("/emails/:id/reply-status", a.getEmailReplyStatus)
+	protected.POST("/emails/:id/reply", a.replyEmail)
 	protected.PATCH("/emails/:id/read", a.markRead)
 	protected.DELETE("/emails/:id", a.deleteEmail)
 	protected.GET("/emails/:id/attachments/:attachmentId/download", a.downloadAttachment)
 	protected.GET("/dashboard", a.dashboard)
+	protected.GET("/outbound/status", a.outboundStatus)
 
 	// API key management (SMTP relay / submission)
 	RegisterApiKeyRoutes(protected, a.DB, mw.Auth(a.Auth, a.DB), a.Config.SMTPAuthHostname, a.Config.SMTPAuthPort, a.Config.SMTPAuthTLSPort)
@@ -536,6 +544,162 @@ func (a App) listEmails(c *gin.Context) {
 	})
 }
 
+type conversationListItem struct {
+	ConversationID string    `json:"conversation_id"`
+	PrimaryEmailID uuid.UUID `json:"primary_email_id"`
+	InboxID        uuid.UUID `json:"inbox_id"`
+	Subject        string    `json:"subject"`
+	FromAddress    string    `json:"from_address"`
+	ToAddress      string    `json:"to_address"`
+	Snippet        string    `json:"snippet"`
+	LatestAt       time.Time `json:"latest_at"`
+	Count          int       `json:"count"`
+	UnreadCount    int       `json:"unread_count"`
+	IsRead         bool      `json:"is_read"`
+}
+
+func (a App) listConversations(c *gin.Context) {
+	user := mw.CurrentUser(c)
+	q := a.DB.Joins("JOIN inboxes ON inboxes.id = emails.inbox_id").Where("inboxes.user_id = ?", user.ID)
+	if inbox := c.Query("inbox_id"); inbox != "" {
+		q = q.Where("emails.inbox_id = ?", inbox)
+	}
+	if unread := c.Query("unread"); unread != "" {
+		switch unread {
+		case "true":
+			q = q.Where("emails.is_read = false")
+		case "false":
+			q = q.Where("emails.is_read = true")
+		default:
+			response.Error(c, http.StatusBadRequest, "invalid_query", "unread must be true or false")
+			return
+		}
+	}
+	pageSize := 25
+	if raw := c.DefaultQuery("page_size", "25"); raw != "" {
+		var err error
+		pageSize, err = parsePositiveInt(raw, 1, 100)
+		if err != nil {
+			response.Error(c, http.StatusBadRequest, "invalid_query", "page_size must be between 1 and 100")
+			return
+		}
+	}
+	page := 1
+	if raw := c.DefaultQuery("page", "1"); raw != "" {
+		var err error
+		page, err = parsePositiveInt(raw, 1, 1000000)
+		if err != nil {
+			response.Error(c, http.StatusBadRequest, "invalid_query", "page must be >= 1")
+			return
+		}
+	}
+
+	var emails []db.Email
+	if err := q.Omit("TextBody", "HTMLBody", "HTMLBodySanitized", "HeadersJSON").
+		Order("emails.received_at desc").
+		Find(&emails).Error; err != nil {
+		response.Error(c, http.StatusInternalServerError, "conversation_list_failed", "could not load conversations")
+		return
+	}
+
+	byConversation := map[string]*conversationListItem{}
+	order := make([]string, 0)
+	for _, row := range emails {
+		key := conversationKey(row)
+		item := byConversation[key]
+		if item == nil {
+			item = &conversationListItem{
+				ConversationID: key,
+				PrimaryEmailID: row.ID,
+				InboxID:        row.InboxID,
+				Subject:        row.Subject,
+				FromAddress:    row.FromAddress,
+				ToAddress:      row.ToAddress,
+				Snippet:        row.Snippet,
+				LatestAt:       row.ReceivedAt,
+			}
+			byConversation[key] = item
+			order = append(order, key)
+		}
+		item.Count++
+		if !row.IsRead {
+			item.UnreadCount++
+		}
+		if row.ReceivedAt.After(item.LatestAt) {
+			item.PrimaryEmailID = row.ID
+			item.InboxID = row.InboxID
+			item.Subject = row.Subject
+			item.FromAddress = row.FromAddress
+			item.ToAddress = row.ToAddress
+			item.Snippet = row.Snippet
+			item.LatestAt = row.ReceivedAt
+		}
+	}
+
+	if len(order) > 0 {
+		var sent []db.SentEmailLog
+		if err := a.DB.Where("user_id = ? AND conversation_id IN ?", user.ID, order).Find(&sent).Error; err != nil {
+			response.Error(c, http.StatusInternalServerError, "conversation_list_failed", "could not load sent conversations")
+			return
+		}
+		for _, row := range sent {
+			item := byConversation[row.ConversationID]
+			if item == nil {
+				continue
+			}
+			item.Count++
+			at := row.CreatedAt
+			if row.SentAt != nil {
+				at = *row.SentAt
+			}
+			if at.After(item.LatestAt) {
+				item.Subject = row.Subject
+				item.FromAddress = row.FromAddress
+				item.ToAddress = row.ToAddress
+				item.Snippet = firstNonEmpty(row.BodyText, row.BodyHTML)
+				item.LatestAt = at
+			}
+		}
+	}
+
+	items := make([]conversationListItem, 0, len(byConversation))
+	for _, item := range byConversation {
+		item.IsRead = item.UnreadCount == 0
+		items = append(items, *item)
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		return items[i].LatestAt.After(items[j].LatestAt)
+	})
+	total := len(items)
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	totalPages := 0
+	if total > 0 {
+		totalPages = (total + pageSize - 1) / pageSize
+	}
+	response.OK(c, gin.H{
+		"items": items[start:end],
+		"pagination": gin.H{
+			"page":        page,
+			"page_size":   pageSize,
+			"total":       total,
+			"total_pages": totalPages,
+			"has_prev":    page > 1,
+			"has_next":    page < totalPages,
+		},
+	})
+}
+
+func conversationKey(row db.Email) string {
+	return firstNonEmpty(cleanHeaderMessageID(row.ConversationID), cleanHeaderMessageID(row.MessageID), row.ID.String())
+}
+
 func (a App) getEmail(c *gin.Context) {
 	user := mw.CurrentUser(c)
 	var row db.Email
@@ -545,6 +709,384 @@ func (a App) getEmail(c *gin.Context) {
 		return
 	}
 	response.OK(c, row)
+}
+
+type replyEmailRequest struct {
+	Mode     string   `json:"mode"`
+	To       []string `json:"to"`
+	Cc       []string `json:"cc"`
+	Bcc      []string `json:"bcc"`
+	Subject  string   `json:"subject"`
+	BodyText string   `json:"body_text"`
+}
+
+func (a App) replyEmail(c *gin.Context) {
+	if a.SendOutbound == nil {
+		response.Error(c, http.StatusServiceUnavailable, "sender_unavailable", "email sender is not configured")
+		return
+	}
+	user := mw.CurrentUser(c)
+	original, inbox, ok := a.loadOwnedEmailWithInbox(c, user.ID, c.Param("id"))
+	if !ok {
+		return
+	}
+	domainReady, reason := a.senderDomainReady(inbox)
+	if !domainReady {
+		response.Error(c, http.StatusForbidden, "sender_domain_not_ready", reason)
+		return
+	}
+	var req replyEmailRequest
+	if !bind(c, &req) {
+		return
+	}
+	req.Mode = strings.ToLower(strings.TrimSpace(req.Mode))
+	if req.Mode == "" {
+		req.Mode = "reply"
+	}
+	if req.Mode != "reply" && req.Mode != "reply_all" && req.Mode != "forward" {
+		response.Error(c, http.StatusBadRequest, "invalid_mode", "mode must be reply, reply_all, or forward")
+		return
+	}
+	to, cc, bcc := replyRecipients(req, original, inbox)
+	if len(to)+len(cc)+len(bcc) == 0 {
+		response.Error(c, http.StatusBadRequest, "invalid_recipients", "at least one recipient is required")
+		return
+	}
+	subject := replySubject(req.Mode, firstNonEmpty(req.Subject, original.Subject))
+	messageID := newOutboundMessageID(inbox.Address)
+	refs := append([]string{}, decodeStringSlice([]byte(original.ReferencesMessageIDs))...)
+	originalMessageID := cleanHeaderMessageID(original.MessageID)
+	if req.Mode != "forward" {
+		if originalMessageID != "" && !containsString(refs, originalMessageID) {
+			refs = append(refs, originalMessageID)
+		}
+	}
+	headers := map[string]string{"Message-ID": "<" + messageID + ">"}
+	inReplyTo := ""
+	conversationID := messageID
+	if req.Mode != "forward" {
+		inReplyTo = originalMessageID
+		conversationID = firstNonEmpty(cleanHeaderMessageID(original.ConversationID), originalMessageID)
+		if inReplyTo != "" {
+			headers["In-Reply-To"] = "<" + inReplyTo + ">"
+		}
+		if len(refs) > 0 {
+			headers["References"] = formatReferences(refs)
+		}
+	}
+	bodyText := strings.TrimSpace(req.BodyText)
+	if bodyText == "" {
+		bodyText = quotedBody(original)
+	}
+	log := db.SentEmailLog{
+		OriginalEmailID:      &original.ID,
+		ParentEmailID:        &original.ID,
+		ConversationID:       conversationID,
+		Mode:                 req.Mode,
+		MessageID:            messageID,
+		InReplyToMessageID:   inReplyTo,
+		ReferencesMessageIDs: encodeJSON(refs),
+	}
+	msg := outbound.Message{
+		From:     inbox.Address,
+		To:       to,
+		Cc:       cc,
+		Bcc:      bcc,
+		Subject:  subject,
+		TextBody: bodyText,
+		Headers:  headers,
+	}
+	if err := a.SendOutbound(user.ID, msg, log); err != nil {
+		response.Error(c, http.StatusInternalServerError, "send_failed", "failed to send email: "+err.Error())
+		return
+	}
+	response.OK(c, gin.H{"sent": true, "message_id": messageID, "conversation_id": conversationID})
+}
+
+func (a App) getEmailReplyStatus(c *gin.Context) {
+	user := mw.CurrentUser(c)
+	_, inbox, ok := a.loadOwnedEmailWithInbox(c, user.ID, c.Param("id"))
+	if !ok {
+		return
+	}
+	domainReady, reason := a.senderDomainReady(inbox)
+	response.OK(c, gin.H{
+		"configured":           a.SendOutbound != nil,
+		"sender_domain_ready":  domainReady,
+		"sender_domain_reason": reason,
+		"from_address":         inbox.Address,
+	})
+}
+
+func (a App) getEmailThread(c *gin.Context) {
+	user := mw.CurrentUser(c)
+	original, _, ok := a.loadOwnedEmailWithInbox(c, user.ID, c.Param("id"))
+	if !ok {
+		return
+	}
+	conversationID := firstNonEmpty(original.ConversationID, original.MessageID)
+	var inbound []db.Email
+	if err := a.DB.Joins("JOIN inboxes ON inboxes.id = emails.inbox_id").
+		Where("inboxes.user_id = ? AND emails.conversation_id = ?", user.ID, conversationID).
+		Order("emails.received_at ASC").
+		Find(&inbound).Error; err != nil {
+		response.Error(c, http.StatusInternalServerError, "thread_failed", "could not load thread")
+		return
+	}
+	var sent []db.SentEmailLog
+	if err := a.DB.Where("user_id = ? AND conversation_id = ?", user.ID, conversationID).
+		Order("COALESCE(sent_at, created_at) ASC").
+		Find(&sent).Error; err != nil {
+		response.Error(c, http.StatusInternalServerError, "thread_failed", "could not load thread")
+		return
+	}
+	items := make([]threadItem, 0, len(inbound)+len(sent))
+	for _, row := range inbound {
+		items = append(items, inboundThreadItem(row))
+	}
+	for _, row := range sent {
+		items = append(items, sentThreadItem(row))
+	}
+	sortThreadItems(items)
+	response.OK(c, gin.H{"conversation_id": conversationID, "root_email_id": original.RootEmailID, "items": items})
+}
+
+func (a App) loadOwnedEmailWithInbox(c *gin.Context, userID uuid.UUID, id string) (db.Email, db.Inbox, bool) {
+	var row db.Email
+	err := a.DB.Preload("Attachments").Joins("JOIN inboxes ON inboxes.id = emails.inbox_id").Where("emails.id = ? AND inboxes.user_id = ?", id, userID).First(&row).Error
+	if err != nil {
+		response.Error(c, http.StatusNotFound, "not_found", "email not found")
+		return db.Email{}, db.Inbox{}, false
+	}
+	var inbox db.Inbox
+	if err := a.DB.First(&inbox, "id = ?", row.InboxID).Error; err != nil {
+		response.Error(c, http.StatusNotFound, "not_found", "inbox not found")
+		return db.Email{}, db.Inbox{}, false
+	}
+	return row, inbox, true
+}
+
+func (a App) senderDomainReady(inbox db.Inbox) (bool, string) {
+	var domain db.Domain
+	if err := a.DB.First(&domain, "id = ? AND deleted_at IS NULL", inbox.DomainID).Error; err != nil {
+		return false, "sender domain was not found"
+	}
+	if domain.Status != db.DomainStatusVerified {
+		return false, "sender domain MX is not verified"
+	}
+	var auth db.DomainEmailAuth
+	if err := a.DB.Where("domain_id = ?", domain.ID).First(&auth).Error; err != nil {
+		return false, "sender domain SPF and DKIM are not verified"
+	}
+	if auth.SPFStatus != db.DomainAuthStatusVerified || auth.DKIMStatus != db.DomainAuthStatusVerified {
+		return false, "sender domain SPF and DKIM are not verified"
+	}
+	return true, ""
+}
+
+type threadItem struct {
+	ID                uuid.UUID `json:"id"`
+	IsOutbound        bool      `json:"is_outbound"`
+	Mode              string    `json:"mode,omitempty"`
+	FromAddress       string    `json:"from_address"`
+	ToAddress         string    `json:"to_address"`
+	CcAddress         string    `json:"cc_address,omitempty"`
+	Subject           string    `json:"subject"`
+	TextBody          string    `json:"text_body,omitempty"`
+	HTMLBodySanitized string    `json:"html_body_sanitized,omitempty"`
+	MessageID         string    `json:"message_id"`
+	ConversationID    string    `json:"conversation_id"`
+	At                time.Time `json:"at"`
+	Status            string    `json:"status,omitempty"`
+}
+
+func inboundThreadItem(row db.Email) threadItem {
+	return threadItem{
+		ID:                row.ID,
+		IsOutbound:        false,
+		FromAddress:       row.FromAddress,
+		ToAddress:         row.ToAddress,
+		Subject:           row.Subject,
+		TextBody:          row.TextBody,
+		HTMLBodySanitized: row.HTMLBodySanitized,
+		MessageID:         row.MessageID,
+		ConversationID:    row.ConversationID,
+		At:                row.ReceivedAt,
+	}
+}
+
+func sentThreadItem(row db.SentEmailLog) threadItem {
+	at := row.CreatedAt
+	if row.SentAt != nil {
+		at = *row.SentAt
+	}
+	return threadItem{
+		ID:             row.ID,
+		IsOutbound:     true,
+		Mode:           row.Mode,
+		FromAddress:    row.FromAddress,
+		ToAddress:      row.ToAddress,
+		CcAddress:      row.CcAddress,
+		Subject:        row.Subject,
+		TextBody:       row.BodyText,
+		MessageID:      row.MessageID,
+		ConversationID: row.ConversationID,
+		At:             at,
+		Status:         row.Status,
+	}
+}
+
+func sortThreadItems(items []threadItem) {
+	sort.SliceStable(items, func(i, j int) bool {
+		return items[i].At.Before(items[j].At)
+	})
+}
+
+func replyRecipients(req replyEmailRequest, original db.Email, inbox db.Inbox) ([]string, []string, []string) {
+	if len(req.To)+len(req.Cc)+len(req.Bcc) > 0 {
+		return cleanAddressList(req.To, inbox.Address), cleanAddressList(req.Cc, inbox.Address), cleanAddressList(req.Bcc, inbox.Address)
+	}
+	switch req.Mode {
+	case "forward":
+		return nil, nil, nil
+	case "reply_all":
+		to := cleanAddressList([]string{original.FromAddress}, inbox.Address)
+		cc := cleanAddressList([]string{original.ToAddress}, inbox.Address)
+		return to, cc, nil
+	default:
+		return cleanAddressList([]string{original.FromAddress}, inbox.Address), nil, nil
+	}
+}
+
+func cleanAddressList(values []string, exclude string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	exclude = strings.ToLower(strings.TrimSpace(exclude))
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			addr, err := mail.ParseAddress(strings.TrimSpace(part))
+			if err != nil || addr.Address == "" {
+				continue
+			}
+			key := strings.ToLower(addr.Address)
+			if key == exclude {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, addr.Address)
+		}
+	}
+	return out
+}
+
+func replySubject(mode, subject string) string {
+	subject = strings.TrimSpace(subject)
+	lower := strings.ToLower(subject)
+	if mode == "forward" {
+		if strings.HasPrefix(lower, "fwd:") {
+			return subject
+		}
+		return "Fwd: " + subject
+	}
+	if strings.HasPrefix(lower, "re:") {
+		return subject
+	}
+	return "Re: " + subject
+}
+
+func newOutboundMessageID(from string) string {
+	domain := "gomail.local"
+	if parts := strings.Split(from, "@"); len(parts) == 2 && strings.TrimSpace(parts[1]) != "" {
+		domain = strings.ToLower(strings.TrimSpace(parts[1]))
+	}
+	return uuid.NewString() + "@" + domain
+}
+
+func quotedBody(email db.Email) string {
+	source := strings.TrimSpace(email.TextBody)
+	if source == "" {
+		source = htmlToText(email.HTMLBodySanitized)
+	}
+	if source == "" {
+		return ""
+	}
+	lines := strings.Split(strings.ReplaceAll(source, "\r\n", "\n"), "\n")
+	for i, line := range lines {
+		lines[i] = "> " + line
+	}
+	return "\n\n" + strings.Join(lines, "\n")
+}
+
+func htmlToText(value string) string {
+	value = strings.ReplaceAll(value, "<br>", "\n")
+	value = strings.ReplaceAll(value, "<br/>", "\n")
+	value = strings.ReplaceAll(value, "<br />", "\n")
+	var out strings.Builder
+	inTag := false
+	for _, r := range value {
+		switch r {
+		case '<':
+			inTag = true
+		case '>':
+			inTag = false
+		default:
+			if !inTag {
+				out.WriteRune(r)
+			}
+		}
+	}
+	return strings.TrimSpace(out.String())
+}
+
+func decodeStringSlice(raw json.RawMessage) []string {
+	var out []string
+	if len(raw) == 0 {
+		return nil
+	}
+	_ = json.Unmarshal(raw, &out)
+	return out
+}
+
+func encodeJSON(value any) []byte {
+	b, _ := json.Marshal(value)
+	return b
+}
+
+func formatReferences(refs []string) string {
+	parts := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		ref = cleanHeaderMessageID(ref)
+		if ref != "" {
+			parts = append(parts, "<"+ref+">")
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func containsString(values []string, needle string) bool {
+	needle = cleanHeaderMessageID(needle)
+	for _, value := range values {
+		if strings.EqualFold(cleanHeaderMessageID(value), needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func cleanHeaderMessageID(value string) string {
+	return strings.Trim(strings.TrimSpace(value), "<>")
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (a App) markRead(c *gin.Context) {
@@ -581,6 +1123,13 @@ func (a App) dashboard(c *gin.Context) {
 	a.DB.Model(&db.Inbox{}).Where("user_id = ? AND is_active = true", user.ID).Count(&inboxes)
 	a.DB.Model(&db.Email{}).Joins("JOIN inboxes ON inboxes.id = emails.inbox_id").Where("inboxes.user_id = ? AND emails.received_at >= ?", user.ID, time.Now().Truncate(24*time.Hour)).Count(&today)
 	response.OK(c, gin.H{"mail_today": today, "storage_used_bytes": user.StorageUsedBytes, "active_inboxes": inboxes})
+}
+
+func (a App) outboundStatus(c *gin.Context) {
+	response.OK(c, gin.H{
+		"configured": a.SendOutbound != nil,
+		"mode":       a.Config.OutboundMode,
+	})
 }
 
 func (a App) events(c *gin.Context) {
@@ -760,7 +1309,6 @@ func (a App) adminDeleteUser(c *gin.Context) {
 				return err
 			}
 		}
-
 
 		if len(emailIDs) > 0 {
 			var attachmentPaths []string

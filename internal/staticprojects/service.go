@@ -24,18 +24,18 @@ import (
 // ---------------------------------------------------------------------------
 
 var (
-	ErrNotFound             = errors.New("project not found")
-	ErrQuotaExceeded        = errors.New("you have reached the website limit")
-	ErrInvalidArchive       = errors.New("invalid archive")
-	ErrArchiveTooLarge      = errors.New("archive exceeds maximum size")
-	ErrPublishRootNotFound  = errors.New("no index.html found in the archive root")
-	ErrMultiplePublishRoot  = errors.New("multiple top-level folders containing index.html – please ensure only one deployment folder")
-	ErrForbiddenFileType    = errors.New("archive contains executable or server-side scripts, which are not allowed")
-	ErrDomainNotAvailable   = errors.New("no custom domain assigned")
-	ErrDomainNotVerified    = errors.New("domain is not verified")
-	ErrDomainAlreadyBound   = errors.New("domain is already bound to another project")
-	ErrSSLConditionNotMet   = errors.New("SSL conditions not met – domain must be verified and DNS must point to this server")
-	ErrPublishFailed        = errors.New("publish failed")
+	ErrNotFound            = errors.New("project not found")
+	ErrQuotaExceeded       = errors.New("you have reached the website limit")
+	ErrInvalidArchive      = errors.New("invalid archive")
+	ErrArchiveTooLarge     = errors.New("archive exceeds maximum size")
+	ErrPublishRootNotFound = errors.New("no index.html found in the archive root")
+	ErrMultiplePublishRoot = errors.New("multiple top-level folders containing index.html – please ensure only one deployment folder")
+	ErrForbiddenFileType   = errors.New("archive contains executable or server-side scripts, which are not allowed")
+	ErrDomainNotAvailable  = errors.New("no custom domain assigned")
+	ErrDomainNotVerified   = errors.New("domain is not verified")
+	ErrDomainAlreadyBound  = errors.New("domain is already bound to another project")
+	ErrSSLConditionNotMet  = errors.New("SSL conditions not met – domain must be verified and DNS must point to this server")
+	ErrPublishFailed       = errors.New("publish failed")
 )
 
 // ---------------------------------------------------------------------------
@@ -50,7 +50,45 @@ type Service struct {
 	Logger      *slog.Logger
 }
 
-func NewService(db *gorm.DB, st *storage.StaticSitesManager, cfg *config.Config, auditLogger *AuditLogger, logger *slog.Logger) *Service {
+func NewService(db *gorm.DB, args ...any) *Service {
+	var st *storage.StaticSitesManager
+	var cfg *config.Config
+	var auditLogger *AuditLogger
+	var logger *slog.Logger
+	if len(args) == 1 {
+		if value, ok := args[0].(config.Config); ok {
+			cfg = &value
+			st = storage.NewStaticSitesManager(value.StaticSitesRoot)
+			auditLogger = NewAuditLogger(db)
+			logger = slog.Default()
+		}
+	} else {
+		if len(args) > 0 {
+			st, _ = args[0].(*storage.StaticSitesManager)
+		}
+		if len(args) > 1 {
+			cfg, _ = args[1].(*config.Config)
+		}
+		if len(args) > 2 {
+			auditLogger, _ = args[2].(*AuditLogger)
+		}
+		if len(args) > 3 {
+			logger, _ = args[3].(*slog.Logger)
+		}
+	}
+	if cfg == nil {
+		empty := config.Config{}
+		cfg = &empty
+	}
+	if st == nil {
+		st = storage.NewStaticSitesManager(cfg.StaticSitesRoot)
+	}
+	if auditLogger == nil {
+		auditLogger = NewAuditLogger(db)
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Service{DB: db, Storage: st, Config: cfg, AuditLogger: auditLogger, Logger: logger}
 }
 
@@ -141,10 +179,10 @@ func (s *Service) publishArchive(ctx context.Context, userID uuid.UUID, name str
 		isNew = false
 		// Set status to deploying
 		s.DB.Model(&project).Updates(map[string]any{
-			"status":          "deploying",
-			"deploy_error":    "",
+			"status":             "deploying",
+			"deploy_error":       "",
 			"archive_size_bytes": archiveSize,
-			"upload_filename": filename,
+			"upload_filename":    filename,
 		})
 	} else {
 		subdomain, err := s.generateSubdomain(name)
@@ -152,11 +190,11 @@ func (s *Service) publishArchive(ctx context.Context, userID uuid.UUID, name str
 			return nil, err
 		}
 		project = db.StaticProject{
-			UserID:          userID,
-			Name:            name,
-			Subdomain:       subdomain,
-			Status:          "deploying",
-			UploadFilename:  filename,
+			UserID:           userID,
+			Name:             name,
+			Subdomain:        subdomain,
+			Status:           "deploying",
+			UploadFilename:   filename,
 			ArchiveSizeBytes: archiveSize,
 		}
 		if err := s.DB.Create(&project).Error; err != nil {
@@ -186,7 +224,8 @@ func (s *Service) publishArchive(ctx context.Context, userID uuid.UUID, name str
 	// Extract and validate archive to staging
 	_, rootFolder, fileCount, err := s.extractAndValidateArchive(archivePath, stagingDir)
 	if err != nil {
-		return s.failProject(project.ID, userID, err.Error())
+		s.markProjectFailed(project.ID, err.Error())
+		return nil, err
 	}
 
 	// Publish (atomic with retry)
@@ -196,24 +235,26 @@ func (s *Service) publishArchive(ctx context.Context, userID uuid.UUID, name str
 	}
 
 	if err := s.publishRetry(publishDir, liveDir); err != nil {
-		return s.failProject(project.ID, userID, "publish: "+err.Error())
+		s.markProjectFailed(project.ID, "publish: "+err.Error())
+		return nil, ErrPublishFailed
 	}
 
 	// Publish success – update project
 	now := time.Now()
 	s.DB.Model(&project).Updates(map[string]any{
-		"status":        "published",
-		"root_folder":   rootFolder,
+		"status":         "published",
+		"root_folder":    rootFolder,
 		"staging_folder": stagingDir,
-		"detected_root": rootFolder,
-		"file_count":    fileCount,
-		"published_at":  &now,
+		"detected_root":  rootFolder,
+		"file_count":     fileCount,
+		"published_at":   &now,
 	})
 
 	// Reload project for response
 	var reloaded db.StaticProject
 	if err := s.DB.First(&reloaded, "id = ?", project.ID).Error; err != nil {
-		return s.failProject(project.ID, userID, "reload after publish: "+err.Error())
+		s.markProjectFailed(project.ID, "reload after publish: "+err.Error())
+		return nil, ErrPublishFailed
 	}
 
 	// Schedule thumbnail generation
@@ -228,12 +269,16 @@ func (s *Service) publishArchive(ctx context.Context, userID uuid.UUID, name str
 }
 
 func (s *Service) failProject(projectID, userID uuid.UUID, errMsg string) (*ProjectResponse, error) {
+	s.markProjectFailed(projectID, errMsg)
+	return s.reloadAndRespond(projectID, userID)
+}
+
+func (s *Service) markProjectFailed(projectID uuid.UUID, errMsg string) {
 	s.DB.Model(&db.StaticProject{}).Where("id = ?", projectID).Updates(map[string]any{
 		"status":       "publish_failed",
 		"deploy_error": errMsg,
 	})
 	s.Logger.Error("publish failed", "project_id", projectID, "error", errMsg)
-	return s.reloadAndRespond(projectID, userID)
 }
 
 // ---------------------------------------------------------------------------

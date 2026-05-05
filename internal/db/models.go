@@ -178,14 +178,20 @@ func (i *Inbox) BeforeCreate(tx *gorm.DB) error {
 }
 
 type Email struct {
-	ID                uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
-	InboxID           uuid.UUID      `gorm:"type:uuid;index;not null" json:"inbox_id"`
-	MessageID         string         `gorm:"index" json:"message_id"`
-	FromAddress       string         `json:"from_address"`
-	ToAddress         string         `json:"to_address"`
-	Subject           string         `json:"subject"`
-	ReceivedAt        time.Time      `gorm:"index" json:"received_at"`
-	Snippet           string         `json:"snippet"`
+	ID                   uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
+	InboxID              uuid.UUID      `gorm:"type:uuid;index;not null" json:"inbox_id"`
+	MessageID            string         `gorm:"index" json:"message_id"`
+	ConversationID       string         `gorm:"column:conversation_id;-:migration" json:"conversation_id"`
+	RootEmailID          *uuid.UUID     `gorm:"column:root_email_id;type:uuid;-:migration" json:"root_email_id,omitempty"`
+	ParentEmailID        *uuid.UUID     `gorm:"column:parent_email_id;type:uuid;-:migration" json:"parent_email_id,omitempty"`
+	InReplyToMessageID   string         `gorm:"column:in_reply_to_message_id;-:migration" json:"in_reply_to_message_id,omitempty"`
+	ReferencesMessageIDs datatypes.JSON `gorm:"column:references_message_ids;-:migration" json:"references_message_ids,omitempty"`
+	FromAddress          string         `json:"from_address"`
+	ToAddress            string         `json:"to_address"`
+	Subject              string         `json:"subject"`
+	ReceivedAt           time.Time      `gorm:"index" json:"received_at"`
+	RawSizeBytes         int64          `json:"raw_size_bytes"`
+	Snippet              string         `json:"snippet"`
 
 	TextBody          string         `json:"text_body,omitempty"`
 	HTMLBody          string         `json:"-"`
@@ -345,22 +351,28 @@ func (l *ApiKeyUsageLog) BeforeCreate(tx *gorm.DB) error {
 
 // SentEmailLog records emails sent through the SMTP relay.
 type SentEmailLog struct {
-	ID           uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
-	UserID       uuid.UUID  `gorm:"type:uuid;index;not null" json:"user_id"`
-	ApiKeyID     *uuid.UUID `gorm:"type:uuid;index" json:"api_key_id,omitempty"`
-	Channel      string     `gorm:"not null;default:'smtp_auth'" json:"channel"`
-	FromAddress  string     `json:"from_address"`
-	ToAddress    string     `json:"to_address"`
-	CcAddress    string     `json:"cc_address"`
-	BccAddress   string     `json:"bcc_address"`
-	Subject      string     `json:"subject"`
-	BodyText     string     `json:"body_text,omitempty"`
-	BodyHTML     string     `json:"body_html,omitempty"`
-	Status       string     `gorm:"index;not null" json:"status"`
-	ErrorMessage string     `json:"error_message"`
-	MessageID    string     `json:"message_id"`
-	SentAt       *time.Time `json:"sent_at"`
-	CreatedAt    time.Time  `json:"created_at"`
+	ID                   uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
+	UserID               uuid.UUID      `gorm:"type:uuid;index;not null" json:"user_id"`
+	ApiKeyID             *uuid.UUID     `gorm:"type:uuid;index" json:"api_key_id,omitempty"`
+	OriginalEmailID      *uuid.UUID     `gorm:"column:original_email_id;type:uuid;-:migration" json:"original_email_id,omitempty"`
+	ParentEmailID        *uuid.UUID     `gorm:"column:parent_email_id;type:uuid;-:migration" json:"parent_email_id,omitempty"`
+	ConversationID       string         `gorm:"column:conversation_id;-:migration" json:"conversation_id,omitempty"`
+	Mode                 string         `gorm:"column:mode;-:migration" json:"mode,omitempty"`
+	InReplyToMessageID   string         `gorm:"column:in_reply_to_message_id;-:migration" json:"in_reply_to_message_id,omitempty"`
+	ReferencesMessageIDs datatypes.JSON `gorm:"column:references_message_ids;-:migration" json:"references_message_ids,omitempty"`
+	Channel              string         `gorm:"not null;default:'smtp_auth'" json:"channel"`
+	FromAddress          string         `json:"from_address"`
+	ToAddress            string         `json:"to_address"`
+	CcAddress            string         `json:"cc_address"`
+	BccAddress           string         `json:"bcc_address"`
+	Subject              string         `json:"subject"`
+	BodyText             string         `json:"body_text,omitempty"`
+	BodyHTML             string         `json:"body_html,omitempty"`
+	Status               string         `gorm:"index;not null" json:"status"`
+	ErrorMessage         string         `json:"error_message"`
+	MessageID            string         `json:"message_id"`
+	SentAt               *time.Time     `json:"sent_at"`
+	CreatedAt            time.Time      `json:"created_at"`
 }
 
 func (s *SentEmailLog) BeforeCreate(tx *gorm.DB) error {

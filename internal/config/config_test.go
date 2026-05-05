@@ -90,3 +90,25 @@ func TestLoadParsesDomainDNSResolvers(t *testing.T) {
 		t.Fatalf("DomainDNSResolvers = %v want %v", cfg.DomainDNSResolvers, want)
 	}
 }
+
+func TestOutboundSMTPConfigured(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		want bool
+	}{
+		{name: "relay mode requires relay host", cfg: Config{OutboundMode: "relay"}, want: false},
+		{name: "relay mode with host", cfg: Config{OutboundMode: "relay", OutboundRelayHost: "smtp.example.com"}, want: true},
+		{name: "direct mode without smtp config", cfg: Config{OutboundMode: "direct"}, want: false},
+		{name: "direct mode with smtp auth enabled", cfg: Config{OutboundMode: "direct", SMTPAuthEnabled: true}, want: true},
+		{name: "direct mode with relay hostname", cfg: Config{OutboundMode: "direct", SMTPRelayHostname: "smtp.example.com"}, want: true},
+		{name: "direct mode with relay public ip", cfg: Config{OutboundMode: "direct", SMTPRelayPublicIP: "203.0.113.10"}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.OutboundSMTPConfigured(); got != tt.want {
+				t.Fatalf("OutboundSMTPConfigured() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

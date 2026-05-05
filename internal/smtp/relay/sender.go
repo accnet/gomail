@@ -8,10 +8,12 @@ import (
 	"net"
 	"net/smtp"
 	"strings"
+	"time"
 
 	"gomail/internal/config"
 	"gomail/internal/db"
 	"gomail/internal/dkimkeys"
+	"gomail/internal/mail/outbound"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -89,6 +91,53 @@ func (s *Sender) Send(apiKeyID uuid.UUID, userID uuid.UUID, from string, rcpts [
 		s.Logger.Warn("failed to log sent email", "error", dbErr)
 	}
 
+	return err
+}
+
+func (s *Sender) SendMessage(apiKeyID *uuid.UUID, userID uuid.UUID, msg outbound.Message, log db.SentEmailLog) error {
+	body, err := outbound.BuildRFC5322(msg)
+	if err == nil && s.Config.DKIMEnabled {
+		body, err = s.signMessage(userID, msg.From, body)
+	}
+
+	channel := "direct"
+	rcpts := msg.Recipients()
+	if err == nil {
+		if s.Config.OutboundMode == "relay" && s.Config.OutboundRelayHost != "" {
+			channel = "relay"
+			err = s.deliverViaRelay(msg.From, rcpts, body)
+		} else {
+			err = s.deliverDirect(msg.From, rcpts, body)
+		}
+	}
+
+	status := db.SentEmailStatusSent
+	if err != nil {
+		status = db.SentEmailStatusFailed
+	}
+	now := time.Now()
+	log.ApiKeyID = apiKeyID
+	log.UserID = userID
+	log.Channel = channel
+	log.FromAddress = strings.Trim(msg.From, "<>")
+	log.ToAddress = strings.Join(msg.To, ",")
+	log.CcAddress = strings.Join(msg.Cc, ",")
+	log.BccAddress = strings.Join(msg.Bcc, ",")
+	log.Subject = msg.Subject
+	log.BodyText = msg.TextBody
+	log.BodyHTML = msg.HTMLBody
+	log.Status = status
+	if status == db.SentEmailStatusSent {
+		log.SentAt = &now
+	} else {
+		log.ErrorMessage = err.Error()
+		if len(log.ErrorMessage) > 500 {
+			log.ErrorMessage = log.ErrorMessage[:500]
+		}
+	}
+	if dbErr := s.DB.Create(&log).Error; dbErr != nil {
+		s.Logger.Warn("failed to log sent email", "error", dbErr)
+	}
 	return err
 }
 

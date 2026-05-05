@@ -14,11 +14,14 @@ import (
 	"gomail/internal/db"
 	"gomail/internal/dns"
 	"gomail/internal/http/handlers"
+	"gomail/internal/mail/outbound"
 	"gomail/internal/realtime"
+	relay "gomail/internal/smtp/relay"
 	"gomail/internal/staticprojects"
 	"gomail/internal/storage"
 	"gomail/pkg/logger"
 
+	"github.com/google/uuid"
 	"log/slog"
 )
 
@@ -76,7 +79,22 @@ func main() {
 	go thumbnailWorker.Run(ctx, time.Minute)
 
 	staticHandler := handlers.NewStaticProjectsHandler(staticSvc)
-	app := handlers.App{DB: database, Auth: authSvc, Config: cfg, Redis: redisClient, Verifier: verifier, StaticProjects: staticHandler}
+	app := handlers.App{
+		DB:             database,
+		Auth:           authSvc,
+		Config:         cfg,
+		Redis:          redisClient,
+		Verifier:       verifier,
+		StaticProjects: staticHandler,
+	}
+	if cfg.OutboundSMTPConfigured() {
+		relaySender := relay.NewSender(database, cfg, logg, make(map[string]int))
+		app.SendOutbound = func(userID uuid.UUID, msg outbound.Message, sentLog db.SentEmailLog) error {
+			return relaySender.SendMessage(nil, userID, msg, sentLog)
+		}
+	} else {
+		logg.Warn("reply email disabled: outbound SMTP is not configured")
+	}
 	router := app.Router()
 	if len(cfg.TrustedProxies) > 0 {
 		_ = router.SetTrustedProxies(cfg.TrustedProxies)
