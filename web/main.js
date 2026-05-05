@@ -921,9 +921,9 @@ async function renderDomains() {
             <thead>
               <tr>
                 <th>Domain</th>
-                <th>Website A</th>
-                <th>SMTP MX</th>
-                <th>SMTP SPF/DKIM</th>
+                <th>A [Website]</th>
+                <th>MX [MAIL]</th>
+                <th>SMTP [SPF/DKIM]</th>
                 <th>Last Verified</th>
                 <th>Actions</th>
 
@@ -1132,7 +1132,7 @@ async function renderDomains() {
 
 async function openDomainEmailAuthModal(domainId) {
   const domain = state.domains.find((d) => d.id === domainId);
-  openModal("SPF / DKIM", `<p style="font-size:13px;color:var(--color-text-secondary)">Loading DNS records...</p>`);
+  openModal("SPF / DKIM / DMARC", `<p style="font-size:13px;color:var(--color-text-secondary)">Loading DNS records...</p>`);
   try {
     const payload = await api(`/domains/${domainId}/email-auth`);
     renderDomainEmailAuthModal(domainId, domain?.name || "", payload);
@@ -1145,6 +1145,7 @@ function renderDomainEmailAuthModal(domainId, domainName, payload) {
   const auth = payload.auth || {};
   const spf = payload.spf || {};
   const dkim = payload.dkim || {};
+  const dmarc = payload.dmarc || {};
   els.modalBody.innerHTML = `
     <div style="display:grid;gap:14px">
       <div class="info-row">
@@ -1164,6 +1165,13 @@ function renderDomainEmailAuthModal(domainId, domainName, payload) {
           ${badge(auth.dkim_status || "pending")}
         </div>
         ${dkim.value ? renderDNSInstruction(dkim) : `<p style="font-size:13px;color:var(--color-text-secondary)">Generate a DKIM selector to create the TXT record.</p>`}
+      </div>
+      <div style="display:grid;gap:10px">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+          <h4 style="font-size:14px;font-weight:600">DMARC</h4>
+          <span style="font-size:12px;color:var(--color-text-tertiary)">Recommended</span>
+        </div>
+        ${renderDNSInstruction(dmarc)}
       </div>
       <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
         <button id="generateDKIMBtn" class="btn btn-secondary btn-sm">Generate DKIM</button>
@@ -1412,10 +1420,11 @@ async function renderEmail() {
             <div id="domainDropdownMenu" class="domain-dropdown-menu hidden">
             ${domains.length ? domains.map((domain) => {
               const canUse = domain.status === "verified";
+              const addressDomainStatus = domain.mx_status || domain.status;
               return `
                 <button type="button" class="domain-dropdown-item ${canUse ? "" : "disabled"}" data-domain-id="${domain.id}" data-domain-name="${escapeHTML(domain.name)}" ${canUse ? "" : "disabled"}>
                   <span class="domain-dropdown-name">${escapeHTML(domain.name)}</span>
-                  ${badge(domain.warning_status || domain.status)}
+                  ${badge(addressDomainStatus)}
                 </button>
               `;
             }).join("") : `
@@ -1856,6 +1865,27 @@ function defaultSmtpSettings() {
   };
 }
 
+function renderSmtpConnectionCards(settings) {
+  const s = settings || defaultSmtpSettings();
+  return `
+    <div class="smtp-connection-grid">
+      <div class="smtp-connection-card smtp-connection-card-primary">
+        <span class="smtp-connection-badge">Recommended</span>
+        <span class="smtp-setting-label">WordPress / Most plugins</span>
+        <code class="smtp-setting-value">TLS / STARTTLS</code>
+        <code class="smtp-setting-value">Port ${escapeHTML(s.port_587 || "587")}</code>
+        <span class="smtp-setting-note">Use this when the plugin says TLS or STARTTLS.</span>
+      </div>
+      <div class="smtp-connection-card">
+        <span class="smtp-setting-label">Legacy SSL mode</span>
+        <code class="smtp-setting-value">SSL / Implicit TLS</code>
+        <code class="smtp-setting-value">Port ${escapeHTML(s.port_465 || "465")}</code>
+        <span class="smtp-setting-note">Use this only when the plugin explicitly asks for SSL on 465.</span>
+      </div>
+    </div>
+  `;
+}
+
 function renderSmtpSettingsPanel(settings) {
   const s = settings || defaultSmtpSettings();
   return `
@@ -1867,32 +1897,36 @@ function renderSmtpSettingsPanel(settings) {
         </div>
       </div>
       <div class="card-body">
+        ${renderSmtpConnectionCards(s)}
         <div class="smtp-settings-grid">
           <div class="smtp-setting">
             <span class="smtp-setting-label">Host</span>
             <code class="smtp-setting-value">${escapeHTML(s.host || "-")}</code>
           </div>
           <div class="smtp-setting">
-            <span class="smtp-setting-label">Port</span>
+            <span class="smtp-setting-label">Recommended Port</span>
             <code class="smtp-setting-value">${escapeHTML(s.port_587 || "587")}</code>
-            <span class="smtp-setting-note">STARTTLS</span>
+            <span class="smtp-setting-note">Choose this with TLS / STARTTLS.</span>
           </div>
           <div class="smtp-setting">
-            <span class="smtp-setting-label">TLS Port</span>
+            <span class="smtp-setting-label">SSL Port</span>
             <code class="smtp-setting-value">${escapeHTML(s.port_465 || "465")}</code>
-            <span class="smtp-setting-note">Implicit TLS</span>
+            <span class="smtp-setting-note">Choose this only with SSL / Implicit TLS.</span>
           </div>
           <div class="smtp-setting">
             <span class="smtp-setting-label">Username</span>
-            <code class="smtp-setting-value">API Key</code>
+            <code class="smtp-setting-value">API Key UUID</code>
+            <span class="smtp-setting-note">Example: 94e51c76-561a-4c85-9e84-ba45ff8c1201</span>
           </div>
           <div class="smtp-setting">
             <span class="smtp-setting-label">Password</span>
             <code class="smtp-setting-value">Secret Key</code>
+            <span class="smtp-setting-note">Use the one-time secret shown when the API key is created.</span>
           </div>
           <div class="smtp-setting">
-            <span class="smtp-setting-label">Security</span>
-            <code class="smtp-setting-value">${escapeHTML(s.recommended_security || "STARTTLS on 587")}</code>
+            <span class="smtp-setting-label">From Email</span>
+            <code class="smtp-setting-value">info@your-verified-domain.com</code>
+            <span class="smtp-setting-note">Must use a verified sender domain such as info@guushirts.com.</span>
           </div>
         </div>
       </div>
@@ -1952,6 +1986,7 @@ function showCreatedApiKey(created) {
   openModal("API Key Created", `
     <div class="api-key-reveal">
       <p class="api-key-reveal-note">The Secret Key is shown once. Use API Key as the SMTP username and Secret Key as the SMTP password.</p>
+      ${renderSmtpConnectionCards(settings)}
       <div class="form-group">
         <label>API Key</label>
         <div class="copy-field">
@@ -1974,20 +2009,27 @@ function showCreatedApiKey(created) {
         <div class="smtp-setting">
           <span class="smtp-setting-label">Username</span>
           <code class="smtp-setting-value">${escapeHTML(apiKey)}</code>
+          <span class="smtp-setting-note">Paste this into the plugin username field.</span>
         </div>
         <div class="smtp-setting">
           <span class="smtp-setting-label">Password</span>
           <code class="smtp-setting-value">Secret Key</code>
+          <span class="smtp-setting-note">Paste the revealed secret into the plugin password field.</span>
         </div>
         <div class="smtp-setting">
-          <span class="smtp-setting-label">Port</span>
+          <span class="smtp-setting-label">TLS / STARTTLS Port</span>
           <code class="smtp-setting-value">${escapeHTML(settings.port_587 || "587")}</code>
-          <span class="smtp-setting-note">STARTTLS</span>
+          <span class="smtp-setting-note">Recommended for WordPress plugins.</span>
         </div>
         <div class="smtp-setting">
-          <span class="smtp-setting-label">TLS Port</span>
+          <span class="smtp-setting-label">SSL Port</span>
           <code class="smtp-setting-value">${escapeHTML(settings.port_465 || "465")}</code>
-          <span class="smtp-setting-note">Implicit TLS</span>
+          <span class="smtp-setting-note">Only use if the plugin explicitly says SSL.</span>
+        </div>
+        <div class="smtp-setting">
+          <span class="smtp-setting-label">From Email</span>
+          <code class="smtp-setting-value">info@your-verified-domain.com</code>
+          <span class="smtp-setting-note">For WordPress, the sender must belong to your verified domain.</span>
         </div>
       </div>
       <button id="doneCreatedApiKeyBtn" class="btn btn-primary btn-full" style="margin-top:16px">Done</button>

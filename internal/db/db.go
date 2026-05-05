@@ -149,9 +149,30 @@ func SeedDemoData(ctx context.Context, database *gorm.DB, cfg config.Config) err
 		{UserID: user.ID, DomainID: domains[1].ID, LocalPart: "support", Address: "support@site2.localhost", IsActive: true},
 	}
 	for i := range inboxes {
-		if err := database.WithContext(ctx).Where("address = ?", inboxes[i].Address).FirstOrCreate(&inboxes[i]).Error; err != nil {
+		var existingInbox Inbox
+		err := database.WithContext(ctx).Unscoped().Where("address = ?", inboxes[i].Address).First(&existingInbox).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			if err := database.WithContext(ctx).Create(&inboxes[i]).Error; err != nil {
+				return err
+			}
+			continue
+		}
+		if err != nil {
 			return err
 		}
+
+		updates := map[string]any{
+			"user_id":    inboxes[i].UserID,
+			"domain_id":  inboxes[i].DomainID,
+			"local_part": inboxes[i].LocalPart,
+			"address":    inboxes[i].Address,
+			"is_active":  inboxes[i].IsActive,
+			"deleted_at": nil,
+		}
+		if err := database.WithContext(ctx).Unscoped().Model(&existingInbox).Updates(updates).Error; err != nil {
+			return err
+		}
+		inboxes[i].ID = existingInbox.ID
 	}
 
 	var existing int64
@@ -183,13 +204,13 @@ func demoEmail(inboxID uuid.UUID, messageID, from, to, subject, snippetText, bod
 	html := "<p>" + body + "</p>"
 	return Email{
 
-		InboxID:           inboxID,
-		MessageID:         messageID,
-		FromAddress:       from,
-		ToAddress:         to,
-		Subject:           subject,
-		ReceivedAt:        receivedAt,
-		Snippet:           snippetText,
+		InboxID:     inboxID,
+		MessageID:   messageID,
+		FromAddress: from,
+		ToAddress:   to,
+		Subject:     subject,
+		ReceivedAt:  receivedAt,
+		Snippet:     snippetText,
 
 		TextBody:          body,
 		HTMLBody:          html,

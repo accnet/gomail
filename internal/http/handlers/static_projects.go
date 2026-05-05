@@ -144,8 +144,8 @@ func (h *StaticProjectsHandler) Deploy(c *gin.Context) {
 		}
 		return
 	}
-	if h.Service.Audit != nil {
-		h.Service.Audit.LogDeploy(user.ID, project.ID, project.Name)
+	if h.Service.AuditLogger != nil {
+		h.Service.AuditLogger.LogDeploy(user.ID, project.ID, project.Name)
 	}
 	response.Created(c, project)
 }
@@ -186,8 +186,8 @@ func (h *StaticProjectsHandler) Redeploy(c *gin.Context) {
 		}
 		return
 	}
-	if h.Service.Audit != nil {
-		h.Service.Audit.LogRedeploy(user.ID, project.ID, project.Name)
+	if h.Service.AuditLogger != nil {
+		h.Service.AuditLogger.LogRedeploy(user.ID, project.ID, project.Name)
 	}
 	response.OK(c, project)
 }
@@ -217,8 +217,8 @@ func (h *StaticProjectsHandler) ToggleStatus(c *gin.Context) {
 		response.Error(c, http.StatusInternalServerError, "status_failed", "could not update status")
 		return
 	}
-	if h.Service.Audit != nil {
-		h.Service.Audit.LogToggleStatus(user.ID, project.ID, project.IsActive)
+	if h.Service.AuditLogger != nil {
+		h.Service.AuditLogger.LogToggleStatus(user.ID, project.ID, project.IsActive)
 	}
 	response.OK(c, project)
 }
@@ -241,8 +241,8 @@ func (h *StaticProjectsHandler) Delete(c *gin.Context) {
 		return
 	}
 	// Note: project already deleted, audit the delete with projectID
-	if h.Service.Audit != nil {
-		h.Service.Audit.LogDelete(user.ID, projectID, "")
+	if h.Service.AuditLogger != nil {
+		h.Service.AuditLogger.LogDelete(user.ID, projectID, "")
 	}
 	response.OK(c, gin.H{"ok": true})
 }
@@ -288,8 +288,8 @@ func (h *StaticProjectsHandler) AssignDomain(c *gin.Context) {
 		}
 		return
 	}
-	if h.Service.Audit != nil {
-		h.Service.Audit.LogDomainAssign(user.ID, project.ID, project.AssignedDomain)
+	if h.Service.AuditLogger != nil {
+		h.Service.AuditLogger.LogDomainAssign(user.ID, project.ID, project.AssignedDomain)
 	}
 	response.OK(c, project)
 }
@@ -312,8 +312,8 @@ func (h *StaticProjectsHandler) UnassignDomain(c *gin.Context) {
 		response.Error(c, http.StatusInternalServerError, "unassign_failed", "could not unassign domain")
 		return
 	}
-	if h.Service.Audit != nil {
-		h.Service.Audit.LogDomainUnassign(user.ID, project.ID, "")
+	if h.Service.AuditLogger != nil {
+		h.Service.AuditLogger.LogDomainUnassign(user.ID, project.ID, "")
 	}
 	response.OK(c, project)
 }
@@ -362,8 +362,8 @@ func (h *StaticProjectsHandler) ActiveSSL(c *gin.Context) {
 		}
 		return
 	}
-	if h.Service.Audit != nil {
-		h.Service.Audit.LogActiveSSL(user.ID, project.ID, project.AssignedDomain)
+	if h.Service.AuditLogger != nil {
+		h.Service.AuditLogger.LogActiveSSL(user.ID, project.ID, project.AssignedDomain)
 	}
 	response.OK(c, project)
 }

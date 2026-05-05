@@ -1395,6 +1395,40 @@ tbody tr:hover {
   gap: 12px;
 }
 
+.smtp-connection-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.smtp-connection-card {
+  position: relative;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.smtp-connection-card-primary {
+  border-color: rgba(37, 99, 235, 0.28);
+  background: var(--color-primary-light);
+}
+
+.smtp-connection-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--color-primary);
+  color: var(--color-primary-text);
+  font-size: 11px;
+  font-weight: 600;
+}
+
 .smtp-setting {
   min-width: 0;
   padding: 12px;
@@ -1976,6 +2010,10 @@ tbody tr:hover {
   .smtp-settings-grid {
     grid-template-columns: 1fr 1fr;
   }
+
+  .smtp-connection-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 768px) {
@@ -2025,6 +2063,7 @@ tbody tr:hover {
   }
 
   .smtp-settings-grid,
+  .smtp-connection-grid,
   .copy-field {
     grid-template-columns: 1fr;
   }

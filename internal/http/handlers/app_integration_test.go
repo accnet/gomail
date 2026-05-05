@@ -344,6 +344,12 @@ func TestDomainEmailAuthGenerateDKIM(t *testing.T) {
 	if !bytes.Contains(getResp.Body.Bytes(), []byte("v=spf1 ip4:203.0.113.10 mx -all")) {
 		t.Fatalf("expected SPF instruction, body=%s", getResp.Body.String())
 	}
+	if !bytes.Contains(getResp.Body.Bytes(), []byte(`"name":"_dmarc.auth-example.test"`)) {
+		t.Fatalf("expected DMARC record name, body=%s", getResp.Body.String())
+	}
+	if !bytes.Contains(getResp.Body.Bytes(), []byte("v=DMARC1; p=none; adkim=s; aspf=s")) {
+		t.Fatalf("expected DMARC instruction, body=%s", getResp.Body.String())
+	}
 
 	genResp := doJSON(t, router, http.MethodPost, "/api/domains/"+domain.ID.String()+"/email-auth/dkim/generate", map[string]string{
 		"selector": "gomail1",

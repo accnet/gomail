@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"image/png"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,53 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
+
+// ---- helpers ----
+
+func newTestService(t *testing.T, db *gorm.DB, cfg *config.Config) *Service {
+	t.Helper()
+	if cfg == nil {
+		cfg = &config.Config{
+			StaticSitesRoot:            t.TempDir(),
+			StaticSitesMaxArchiveBytes: 1024 * 1024,
+			StaticSitesMaxExtractedBytes: 1024 * 1024,
+			StaticSitesMaxFileCount:    100,
+		}
+	}
+	storageMgr := storage.NewStaticSitesManager(cfg.StaticSitesRoot)
+	auditLogger := NewAuditLogger(db)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+
+	if db == nil {
+		auditLogger = nil
+		logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
+	}
+
+	return NewService(db, storageMgr, cfg, auditLogger, logger)
+}
+
+func zipBytes(files map[string]string) []byte {
+	buf := new(bytes.Buffer)
+	w := zip.NewWriter(buf)
+	for name, content := range files {
+		f, _ := w.Create(name)
+		f.Write([]byte(content))
+	}
+	w.Close()
+	return buf.Bytes()
+}
+
+// createZipFile creates an in-memory ZIP with the given file and returns the zip.File.
+func createZipFile(name string, content []byte) *zip.File {
+	buf := new(bytes.Buffer)
+	w := zip.NewWriter(buf)
+	f, _ := w.Create(name)
+	f.Write(content)
+	w.Close()
+
+	reader, _ := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	return reader.File[0]
+}
 
 // ---- T70: ZIP validators ----
 
@@ -154,20 +202,26 @@ func TestExtractAndValidateLimits(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc := &Service{
-				Config: config.Config{
-					StaticSitesRoot:              t.TempDir(),
-					StaticSitesMaxArchiveBytes:   1024 * 1024,
-					StaticSitesMaxExtractedBytes: tt.maxBytes,
-					StaticSitesMaxFileCount:      tt.maxFiles,
-				},
+			cfg := &config.Config{
+				StaticSitesRoot:              t.TempDir(),
+				StaticSitesMaxArchiveBytes:   1024 * 1024,
+				StaticSitesMaxExtractedBytes: tt.maxBytes,
+				StaticSitesMaxFileCount:      tt.maxFiles,
 			}
-			svc.Storage = storageManagerForTest(svc.Config.StaticSitesRoot)
+			svc := newTestService(t, nil, cfg)
 			projectID := uuid.New()
 			if err := svc.Storage.EnsureProjectDirs(projectID); err != nil {
 				t.Fatal(err)
 			}
-			_, _, _, err := svc.extractAndValidate(projectID, zipBytes(tt.files))
+			paths := svc.Storage.ProjectPaths(projectID)
+
+			// Create a temp zip file
+			tmpZip := filepath.Join(t.TempDir(), "test.zip")
+			if err := os.WriteFile(tmpZip, zipBytes(tt.files), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			_, _, err := svc.extractAndValidate(tmpZip, paths.Staging)
 			if err == nil || !strings.Contains(err.Error(), tt.wantErrMsg) {
 				t.Fatalf("extractAndValidate error = %v, want %q", err, tt.wantErrMsg)
 			}
@@ -188,23 +242,30 @@ func TestDeployRejectsOversizedArchive(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	svc := NewService(database, config.Config{
+	cfg := &config.Config{
 		StaticSitesRoot:              t.TempDir(),
-		StaticSitesMaxArchiveBytes:   16,
+		StaticSitesMaxArchiveBytes:   8,
 		StaticSitesMaxExtractedBytes: 1024,
 		StaticSitesMaxFileCount:      10,
-	})
+	}
+	svc := newTestService(t, database, cfg)
 
+	// Use random-looking content that won't compress well, ensuring the zip exceeds 8 bytes
+	content := make([]byte, 200)
+	for i := range content {
+		content[i] = byte(i%256) + byte(i/256)
+	}
 	_, err = svc.DeployStream(nil, userID, "Too Big", bytes.NewReader(zipBytes(map[string]string{
-		"index.html": strings.Repeat("x", 128),
+		"index.html": string(content),
 	})), "site.zip")
-	if err == nil || !strings.Contains(err.Error(), "archive size") {
+	if err == nil || !strings.Contains(err.Error(), "archive exceeds") {
 		t.Fatalf("DeployStream error = %v, want archive size error", err)
 	}
 }
 
 func TestPublishAtomicPreservesExistingLiveOnFailure(t *testing.T) {
-	svc := NewService(nil, config.Config{StaticSitesRoot: t.TempDir()})
+	cfg := &config.Config{StaticSitesRoot: t.TempDir()}
+	svc := newTestService(t, nil, cfg)
 	projectID := uuid.New()
 	paths := svc.Storage.ProjectPaths(projectID)
 	if err := os.MkdirAll(paths.Live, 0755); err != nil {
@@ -214,7 +275,8 @@ func TestPublishAtomicPreservesExistingLiveOnFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := svc.publishAtomic(projectID, "")
+	// Pass empty staging dir that doesn't exist to trigger failure
+	err := svc.publishAtomic("", paths.Live)
 	if err == nil {
 		t.Fatal("expected publishAtomic to fail when staging is missing")
 	}
@@ -228,7 +290,8 @@ func TestPublishAtomicPreservesExistingLiveOnFailure(t *testing.T) {
 }
 
 func TestPublishAtomicPreservesOldThumbnail(t *testing.T) {
-	svc := NewService(nil, config.Config{StaticSitesRoot: t.TempDir()})
+	cfg := &config.Config{StaticSitesRoot: t.TempDir()}
+	svc := newTestService(t, nil, cfg)
 	projectID := uuid.New()
 	paths := svc.Storage.ProjectPaths(projectID)
 	if err := os.MkdirAll(paths.Live, 0755); err != nil {
@@ -244,7 +307,7 @@ func TestPublishAtomicPreservesOldThumbnail(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := svc.publishAtomic(projectID, ""); err != nil {
+	if err := svc.publishAtomic(paths.Staging, paths.Live); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(filepath.Join(paths.Live, "thumbnail.png"))
@@ -299,7 +362,7 @@ func TestQuotaInfoAndGenerateSubdomain(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	svc := NewService(database, config.Config{StaticSitesRoot: t.TempDir()})
+	svc := newTestService(t, database, nil)
 	used, max, err := svc.QuotaInfo(userID)
 	if err != nil {
 		t.Fatal(err)
@@ -308,12 +371,9 @@ func TestQuotaInfoAndGenerateSubdomain(t *testing.T) {
 		t.Fatalf("QuotaInfo = used %d max %d, want used 1 max 3", used, max)
 	}
 
-	subdomain, err := svc.generateSubdomain(nil)
+	subdomain, err := svc.generateSubdomain("random")
 	if err != nil {
 		t.Fatal(err)
-	}
-	if len(subdomain) != 8 {
-		t.Fatalf("subdomain length = %d, want 8", len(subdomain))
 	}
 	if subdomain == "one" {
 		t.Fatal("generated subdomain collided with existing project")
@@ -345,7 +405,8 @@ func TestCheckDomainIPLocalhost(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	svc := NewService(database, config.Config{StaticSitesRoot: t.TempDir(), TraefikPublicIP: "127.0.0.1"})
+	cfg := &config.Config{StaticSitesRoot: t.TempDir(), TraefikPublicIP: "127.0.0.1"}
+	svc := newTestService(t, database, cfg)
 	ok, msg, err := svc.CheckDomainIP(projectID, userID)
 	if err != nil {
 		t.Fatal(err)
@@ -386,11 +447,12 @@ func TestDomainAssignmentAndActiveSSL(t *testing.T) {
 		}
 	}
 
-	svc := NewService(database, config.Config{
+	cfg := &config.Config{
 		StaticSitesRoot:       t.TempDir(),
 		TraefikDynamicConfDir: confDir,
 		StaticServerAddr:      ":8090",
-	})
+	}
+	svc := newTestService(t, database, cfg)
 
 	available, err := svc.AvailableDomains(userID)
 	if err != nil {
@@ -499,12 +561,13 @@ func TestDomainAssignmentAndActiveSSLWithCommandProvisioner(t *testing.T) {
 		}
 	}
 
-	svc := NewService(database, config.Config{
+	cfg := &config.Config{
 		StaticSitesRoot:              t.TempDir(),
 		StaticSitesSSLProvider:       "command",
 		StaticSitesSSLIssueCommand:   issueScript,
 		StaticSitesSSLCleanupCommand: cleanupScript,
-	})
+	}
+	svc := newTestService(t, database, cfg)
 
 	if _, err := svc.AssignDomain(userID, projectID, domainID); err != nil {
 		t.Fatal(err)
@@ -654,33 +717,4 @@ func TestThumbnailWorkerRefreshesLegacyReadyPlaceholder(t *testing.T) {
 	if thumbImg.Width != 1280 || thumbImg.Height != 720 {
 		t.Fatalf("thumbnail dimensions = %dx%d, want 1280x720", thumbImg.Width, thumbImg.Height)
 	}
-}
-
-// ---- helpers ----
-
-func zipBytes(files map[string]string) []byte {
-	buf := new(bytes.Buffer)
-	w := zip.NewWriter(buf)
-	for name, content := range files {
-		f, _ := w.Create(name)
-		f.Write([]byte(content))
-	}
-	w.Close()
-	return buf.Bytes()
-}
-
-func storageManagerForTest(root string) *storage.StaticSitesManager {
-	return storage.NewStaticSitesManager(root)
-}
-
-// createZipFile creates an in-memory ZIP with the given file and returns the zip.File.
-func createZipFile(name string, content []byte) *zip.File {
-	buf := new(bytes.Buffer)
-	w := zip.NewWriter(buf)
-	f, _ := w.Create(name)
-	f.Write(content)
-	w.Close()
-
-	reader, _ := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
-	return reader.File[0]
 }

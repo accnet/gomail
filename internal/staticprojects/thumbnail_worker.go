@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"gomail/internal/db"
+
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -62,7 +64,7 @@ func (w *ThumbnailWorker) processPending() {
 		ThumbnailStatus string
 	}
 
-	w.DB.Table("static_projects").
+	w.DB.Model(&db.StaticProject{}).
 		Select("id, subdomain, root_folder, thumbnail_path, thumbnail_status").
 		Where("status = ? AND is_active = ? AND deleted_at IS NULL", "published", true).
 		Find(&projects)
@@ -116,9 +118,7 @@ func (w *ThumbnailWorker) isLegacyPlaceholder(rootFolder, thumbnailPath string) 
 
 // generateThumbnail generates a thumbnail for the given project.
 func (w *ThumbnailWorker) generateThumbnail(projectID uuid.UUID, subdomain, rootFolder string) {
-	w.DB.Model(&struct{}{}).Table("static_projects").
-		Where("id = ?", projectID).
-		Update("thumbnail_status", "processing")
+	w.DB.Model(&db.StaticProject{}).Where("id = ?", projectID).Update("thumbnail_status", "processing")
 
 	thumbnailPath := filepath.Join(rootFolder, "thumbnail.png")
 
@@ -129,22 +129,18 @@ func (w *ThumbnailWorker) generateThumbnail(projectID uuid.UUID, subdomain, root
 		// Generate a simple HTML-based placeholder instead
 		if err2 := w.generatePlaceholder(thumbnailPath); err2 != nil {
 			log.Printf("thumbnail placeholder failed for %s: %v", subdomain, err2)
-			w.DB.Model(&struct{}{}).Table("static_projects").
-				Where("id = ?", projectID).
-				Update("thumbnail_status", "failed")
+			w.DB.Model(&db.StaticProject{}).Where("id = ?", projectID).Update("thumbnail_status", "failed")
 			return
 		}
 	}
 
 	// Check if file was created
 	if _, err := os.Stat(thumbnailPath); err != nil {
-		w.DB.Model(&struct{}{}).Table("static_projects").
-			Where("id = ?", projectID).
-			Update("thumbnail_status", "failed")
+		w.DB.Model(&db.StaticProject{}).Where("id = ?", projectID).Update("thumbnail_status", "failed")
 		return
 	}
 
-	w.DB.Model(&struct{}{}).Table("static_projects").
+	w.DB.Model(&db.StaticProject{}).
 		Where("id = ?", projectID).
 		Updates(map[string]any{
 			"thumbnail_path":   thumbnailPath,

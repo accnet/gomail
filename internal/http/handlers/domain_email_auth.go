@@ -27,9 +27,10 @@ import (
 var dkimSelectorPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$`)
 
 type domainEmailAuthResponse struct {
-	Auth db.DomainEmailAuth `json:"auth"`
-	SPF  dnsInstruction     `json:"spf"`
-	DKIM dnsInstruction     `json:"dkim"`
+	Auth  db.DomainEmailAuth `json:"auth"`
+	SPF   dnsInstruction     `json:"spf"`
+	DKIM  dnsInstruction     `json:"dkim"`
+	DMARC dnsInstruction     `json:"dmarc"`
 }
 
 type dnsInstruction struct {
@@ -210,6 +211,11 @@ func buildDomainEmailAuthResponse(domain db.Domain, auth db.DomainEmailAuth) dom
 			Type:  "TXT",
 			Value: auth.DKIMRecordValue,
 		},
+		DMARC: dnsInstruction{
+			Name:  "_dmarc." + domain.Name,
+			Type:  "TXT",
+			Value: expectedDMARCRecord(),
+		},
 	}
 }
 
@@ -251,6 +257,10 @@ func expectedSPFRecord(cfg config.Config) string {
 		return "v=spf1 mx -all"
 	}
 	return "v=spf1 " + mechanism + " mx -all"
+}
+
+func expectedDMARCRecord() string {
+	return "v=DMARC1; p=none; adkim=s; aspf=s"
 }
 
 func spfRequiredMechanism(cfg config.Config) string {

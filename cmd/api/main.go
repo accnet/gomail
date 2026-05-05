@@ -16,7 +16,10 @@ import (
 	"gomail/internal/http/handlers"
 	"gomail/internal/realtime"
 	"gomail/internal/staticprojects"
+	"gomail/internal/storage"
 	"gomail/pkg/logger"
+
+	"log/slog"
 )
 
 func main() {
@@ -61,7 +64,9 @@ func main() {
 
 	go handlers.BackgroundDomainRecheck(ctx, database, verifier, cfg, cfg.DomainRecheckEvery)
 
-	staticSvc := staticprojects.NewService(database, cfg)
+	storageMgr := storage.NewStaticSitesManager(cfg.StaticSitesRoot)
+	auditLogger := staticprojects.NewAuditLogger(database)
+	staticSvc := staticprojects.NewService(database, storageMgr, &cfg, auditLogger, slog.Default())
 	thumbnailWorker := staticprojects.NewThumbnailWorker(database, cfg.StaticSitesRoot, func(subdomain string) string {
 		if subdomain == "" || cfg.StaticSitesBaseDomain == "" {
 			return ""
