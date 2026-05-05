@@ -514,8 +514,8 @@ In development mode, a demo super admin is seeded automatically. Disable with `S
 | [`install.sh`](./install.sh) | First-time VPS provisioning (Docker, Go, nginx, systemd, TLS) |
 | [`upgrade.sh`](./upgrade.sh) | In-place upgrade from git or archive |
 | [`start.sh`](./start.sh) | Local dev build & run |
-| [`ssl-fix.sh`](./ssl-fix.sh) | Re-request main app TLS certificate |
-| [`wildcard-ssl.sh`](./wildcard-ssl.sh) | Manage wildcard SSL for static sites |
+| [`scripts/ssl-fix.sh`](./ssl-fix.sh) | Re-request main app TLS certificate |
+| [`scripts/wildcard-ssl.sh`](./wildcard-ssl.sh) | Manage wildcard SSL for static sites |
 | [`scripts/custom-domain-ssl.sh`](./scripts/custom-domain-ssl.sh) | Per-domain SSL provisioning |
 | [`scripts/dev-smtp-sink.py`](./scripts/dev-smtp-sink.py) | Development SMTP sink for testing |
 | [`scripts/manual_e2e.sh`](./scripts/manual_e2e.sh) | Manual end-to-end test script |

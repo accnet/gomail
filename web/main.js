@@ -123,36 +123,34 @@ const api = async (path, options = {}) => {
       ...fetchOptions,
       headers
     });
-  if (res.status === 401 && refresh !== false && refreshToken) {
-    const refreshed = await refreshSession();
-    if (refreshed) {
-      return api(path, { ...options, refresh: false });
+    if (res.status === 401 && refresh !== false && refreshToken) {
+      const refreshed = await refreshSession();
+      if (refreshed) {
+        return await api(path, { ...options, refresh: false });
+      }
     }
-  }
-  if (!res.ok) {
-    let body = { message: "Request failed" };
-    try {
-      body = await res.clone().json();
-    } catch (_) {
-      const text = await res.text().catch(() => "");
-      if (text) body.message = text;
+    if (!res.ok) {
+      let body = { message: "Request failed" };
+      try {
+        body = await res.clone().json();
+      } catch (_) {
+        const text = await res.text().catch(() => "");
+        if (text) body.message = text;
+      }
+      const staleTeamContext =
+        includeTeamHeader &&
+        (body.code === "invalid_team_id" ||
+          (body.code === "forbidden" && body.message === "not a member of this team"));
+      if (staleTeamContext && refresh !== false) {
+        localStorage.removeItem("active_team_id");
+        return await api(path, { ...options, refresh: false, team: false });
+      }
+      throw new Error(body.message || "Request failed");
     }
-    const staleTeamContext =
-      includeTeamHeader &&
-      (body.code === "invalid_team_id" ||
-        (body.code === "forbidden" && body.message === "not a member of this team"));
-    if (staleTeamContext && refresh !== false) {
-      localStorage.removeItem("active_team_id");
-      return api(path, { ...options, refresh: false, team: false });
-    }
-    throw new Error(body.message || "Request failed");
-  }
     const data = await res.json();
-    finishProgress();
     return data;
-  } catch (err) {
+  } finally {
     finishProgress();
-    throw err;
   }
 };
 
@@ -582,6 +580,8 @@ async function bootstrapSession() {
     return;
   }
   updateAccountUI();
+  // Set sidebar MX target from SaaS settings
+  api("/settings/general").then(s => { if (s?.mx_target) els.sidebarMx.textContent = s.mx_target; }).catch(() => {});
   await initTeamSwitcher();
   connectEvents();
   try {
@@ -1954,7 +1954,15 @@ async function renderDomains() {
   ]);
   state.domains = domains || [];
   state.websites = websites || [];
-  const mxTarget = state.domains[0]?.mx_target || "Configured on server";
+  // MX target: prefer SaaS-level MX_TARGET from settings, fallback to first domain's mx_target
+  let mxTarget = "Configured on server";
+  try {
+    const settings = await api("/settings/general");
+    mxTarget = settings?.mx_target || mxTarget;
+  } catch (_) {}
+  if (mxTarget === "Configured on server" && state.domains.length > 0) {
+    mxTarget = state.domains[0]?.mx_target || mxTarget;
+  }
   els.sidebarMx.textContent = mxTarget;
 
   const verifiedCount = state.domains.filter((d) => d.status === "verified").length;

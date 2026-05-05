@@ -15,6 +15,8 @@ func (a App) getGeneralSettings(c *gin.Context) {
 		"saas_domain":      a.Config.SaaSDomain,
 		"landing_root":     a.Config.LandingRoot,
 		"saas_domain_mode": db.GetSaaSDomainMode(a.DB),
+		"mx_target":        a.Config.MXTarget,
+		"smtp_hostname":    a.Config.SMTPHostname,
 	})
 }
 
@@ -41,5 +43,7 @@ func (a App) patchGeneralSettings(c *gin.Context) {
 		"saas_domain":      a.Config.SaaSDomain,
 		"landing_root":     a.Config.LandingRoot,
 		"saas_domain_mode": mode,
+		"mx_target":        a.Config.MXTarget,
+		"smtp_hostname":    a.Config.SMTPHostname,
 	})
 }

@@ -784,7 +784,7 @@ input, select, textarea {
 }
 
 .grid-2-wide {
-  grid-template-columns: 1.4fr 1fr;
+  grid-template-columns: 1fr 1fr;
 }
 
 .grid-2-narrow {
