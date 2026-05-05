@@ -17,6 +17,7 @@ const state = {
   domains: [],
   inboxes: [],
   emails: [],
+  conversations: [],
   emailPagination: null,
   users: [],
   dashboard: null,
@@ -27,7 +28,8 @@ const state = {
   websites: [],
   websiteQuota: null,
   apiKeys: [],
-  smtpSettings: null
+  smtpSettings: null,
+  outbound: null
 };
 
 // --- DOM References ---
@@ -221,6 +223,10 @@ function storagePercent(user) {
 }
 
 function emailItems(payload) {
+  return Array.isArray(payload) ? payload : (payload?.items || []);
+}
+
+function conversationItems(payload) {
   return Array.isArray(payload) ? payload : (payload?.items || []);
 }
 
@@ -1275,29 +1281,31 @@ async function renderEmail() {
   });
   if (state.emailUnreadOnly) query.set("unread", "true");
   if (state.selectedInboxID) query.set("inbox_id", state.selectedInboxID);
-  const [inboxes, emailsPayload, domains] = await Promise.all([
+  const [inboxes, conversationsPayload, domains, outbound] = await Promise.all([
     api("/inboxes"),
-    api(`/emails?${query.toString()}`),
-    api("/domains")
+    api(`/conversations?${query.toString()}`),
+    api("/domains"),
+    api("/outbound/status").catch(() => ({ configured: false }))
   ]);
   state.inboxes = inboxes;
-  state.emails = emailItems(emailsPayload);
-  state.emailPagination = Array.isArray(emailsPayload) ? null : emailsPayload.pagination;
+  state.conversations = conversationItems(conversationsPayload);
+  state.emailPagination = Array.isArray(conversationsPayload) ? null : conversationsPayload.pagination;
   state.domains = domains;
+  state.outbound = outbound || { configured: false };
 
   state.selectedInboxID = inboxes.find((i) => i.id === state.selectedInboxID)?.id ||
-    state.emails.find((m) => m.id === state.selectedEmailID)?.inbox_id ||
+    state.conversations.find((m) => m.primary_email_id === state.selectedEmailID)?.inbox_id ||
     inboxes[0]?.id || null;
 
-  const filteredEmails = state.selectedInboxID
-    ? state.emails.filter((m) => m.inbox_id === state.selectedInboxID)
-    : state.emails;
+  const filteredConversations = state.selectedInboxID
+    ? state.conversations.filter((m) => m.inbox_id === state.selectedInboxID)
+    : state.conversations;
 
-  state.selectedEmailID = filteredEmails.find((m) => m.id === state.selectedEmailID)?.id ||
-    filteredEmails[0]?.id || null;
+  state.selectedEmailID = filteredConversations.find((m) => m.primary_email_id === state.selectedEmailID)?.primary_email_id ||
+    filteredConversations[0]?.primary_email_id || null;
 
   const selectedInbox = inboxes.find((i) => i.id === state.selectedInboxID);
-  const unreadCount = state.emails.filter((m) => !m.is_read).length;
+  const unreadCount = state.conversations.reduce((sum, m) => sum + Number(m.unread_count || 0), 0);
 
   els.pageContent.innerHTML = `
     <div class="email-layout">
@@ -1342,7 +1350,7 @@ async function renderEmail() {
         <div class="email-panel-header">
           <div>
             <h3>${selectedInbox ? escapeHTML(selectedInbox.address) : "All Mail"}</h3>
-            <p class="sub">${state.emailPagination?.total ?? filteredEmails.length} messages</p>
+            <p class="sub">${state.emailPagination?.total ?? filteredConversations.length} conversations</p>
           </div>
           <button id="refreshEmailsBtn" class="icon-btn" title="Refresh">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
@@ -1358,14 +1366,14 @@ async function renderEmail() {
             </div>
           </div>
 
-          ${filteredEmails.length ? filteredEmails.map((mail) => `
-            <button class="email-item ${state.selectedEmailID === mail.id ? "active" : ""}" data-email-id="${mail.id}">
+          ${filteredConversations.length ? filteredConversations.map((mail) => `
+            <button class="email-item ${state.selectedEmailID === mail.primary_email_id ? "active" : ""} ${mail.unread_count ? "unread" : ""}" data-email-id="${mail.primary_email_id}">
               <div class="email-item-row">
                 <div class="email-avatar">${initials(mail.from_address)}</div>
                 <div class="email-item-content">
                   <div class="email-item-top">
-                    <span class="email-item-subject">${escapeHTML(mail.subject || "(no subject)")}</span>
-                    <span class="email-item-time">${relative(mail.received_at)}</span>
+                    <span class="email-item-subject">${escapeHTML(mail.subject || "(no subject)")}${mail.count > 1 ? ` <span class="email-thread-count">${mail.count}</span>` : ""}</span>
+                    <span class="email-item-time">${relative(mail.latest_at)}</span>
                   </div>
                   <div class="email-item-from">${escapeHTML(mail.from_address || "Unknown sender")}</div>
                   <div class="email-item-snippet">${escapeHTML(mail.snippet || "")}</div>
@@ -1479,8 +1487,8 @@ async function renderEmail() {
     button.onclick = async () => {
       state.selectedInboxID = button.dataset.mailboxId;
       state.emailPage = 1;
-      state.selectedEmailID = filteredEmails.find((m) => m.inbox_id === state.selectedInboxID)?.id ||
-        state.emails.find((m) => m.inbox_id === state.selectedInboxID)?.id || null;
+      state.selectedEmailID = filteredConversations.find((m) => m.inbox_id === state.selectedInboxID)?.primary_email_id ||
+        state.conversations.find((m) => m.inbox_id === state.selectedInboxID)?.primary_email_id || null;
       await renderEmail();
     };
   });
@@ -1552,34 +1560,41 @@ async function renderEmail() {
 async function renderEmailDetail(emailID) {
   state.selectedEmailID = emailID;
   const email = await api(`/emails/${emailID}`);
+  let thread = null;
+  try {
+    thread = await api(`/emails/${emailID}/thread`);
+  } catch (_) {
+    thread = null;
+  }
   const container = document.getElementById("emailDetailContainer");
+  const outboundConfigured = Boolean(state.outbound?.configured);
+  const threadItems = thread?.items?.length ? thread.items : [emailToThreadItem(email)];
+  const latestItem = threadItems[threadItems.length - 1] || emailToThreadItem(email);
 
   container.innerHTML = `
     <div class="email-detail">
       <div class="email-detail-header">
         <div class="email-detail-sender">
-          <div class="email-detail-avatar">${initials(email.from_address)}</div>
+          <div class="email-detail-avatar">${initials(latestItem.from_address)}</div>
           <div class="email-detail-meta">
-            <h3 class="email-detail-subject">${escapeHTML(email.subject || "(no subject)")}</h3>
-            <p class="email-detail-from">From: <strong>${escapeHTML(email.from_address || "Unknown sender")}</strong></p>
-            <p class="email-detail-to">To: <strong>${escapeHTML(email.to_address || "-")}</strong></p>
+            <h3 class="email-detail-subject">${escapeHTML(latestItem.subject || "(no subject)")}</h3>
+            <p class="email-detail-from">${threadItems.length} message${threadItems.length === 1 ? "" : "s"} in this conversation</p>
+            <p class="email-detail-to">Latest: <strong>${escapeHTML(latestItem.is_outbound ? `You to ${latestItem.to_address || "-"}` : latestItem.from_address || "Unknown sender")}</strong></p>
           </div>
-          <div class="email-detail-time">${relative(email.received_at)}</div>
+          <div class="email-detail-time">${relative(latestItem.at || email.received_at)}</div>
+        </div>
+        <div class="email-reply-actions">
+          <button class="btn btn-secondary btn-sm" data-email-compose="reply">Reply</button>
+          <button class="btn btn-secondary btn-sm" data-email-compose="reply_all">Reply all</button>
+          <button class="btn btn-ghost btn-sm" data-email-compose="forward">Forward</button>
+          ${outboundConfigured ? "" : `<span class="email-reply-disabled-note">Outbound SMTP is not configured</span>`}
         </div>
       </div>
 
       <div class="email-detail-body">
-
-        <!-- HTML Body -->
-        <div class="email-detail-html" id="emailHtmlBody">${email.html_body_sanitized || "<p style='color:var(--color-text-tertiary)'>This email has no HTML content.</p>"}</div>
-
-        <!-- Plain Text (hidden by default, toggled) -->
-        ${email.text_body ? `
-        <div class="email-detail-plain" id="emailPlainBody" style="display:none">${escapeHTML(email.text_body)}</div>
-        <div class="email-detail-actions">
-          <button class="btn btn-ghost btn-xs" id="toggleViewBtn">Show plain text</button>
+        <div class="gmail-thread">
+          ${threadItems.map((item) => renderThreadMessage(item, email)).join("")}
         </div>
-        ` : ""}
 
         <!-- Attachments -->
         ${email.attachments?.length ? `
@@ -1641,18 +1656,15 @@ async function renderEmailDetail(emailID) {
     </div>
   `;
 
-  // Toggle plain text / HTML view
-  const toggleBtn = document.getElementById("toggleViewBtn");
-  const htmlBody = document.getElementById("emailHtmlBody");
-  const plainBody = document.getElementById("emailPlainBody");
-  if (toggleBtn && htmlBody && plainBody) {
-    toggleBtn.onclick = () => {
-      const showingHtml = htmlBody.style.display !== "none";
-      htmlBody.style.display = showingHtml ? "none" : "";
-      plainBody.style.display = showingHtml ? "" : "none";
-      toggleBtn.textContent = showingHtml ? "Show HTML" : "Show plain text";
+  document.querySelectorAll("[data-email-compose]").forEach((button) => {
+    button.onclick = () => {
+      if (!state.outbound?.configured) {
+        openSMTPNotConfiguredModal();
+        return;
+      }
+      openReplyModal(email, button.dataset.emailCompose);
     };
-  }
+  });
 
   document.querySelectorAll("[data-download-email]").forEach((button) => {
     button.onclick = async () => {
@@ -1673,6 +1685,153 @@ async function renderEmailDetail(emailID) {
       }
     };
   });
+}
+
+function emailToThreadItem(email) {
+  return {
+    id: email.id,
+    is_outbound: false,
+    from_address: email.from_address,
+    to_address: email.to_address,
+    subject: email.subject,
+    text_body: email.text_body,
+    html_body_sanitized: email.html_body_sanitized,
+    message_id: email.message_id,
+    conversation_id: email.conversation_id,
+    at: email.received_at
+  };
+}
+
+function renderThreadMessage(item, selectedEmail) {
+  const sender = item.is_outbound ? `You to ${item.to_address || "-"}` : (item.from_address || "Unknown sender");
+  const body = item.html_body_sanitized
+    ? `<div class="gmail-thread-html">${item.html_body_sanitized}</div>`
+    : `<pre class="gmail-thread-plain">${escapeHTML(item.text_body || "")}</pre>`;
+  return `
+    <article class="gmail-thread-message ${item.id === selectedEmail.id ? "active" : ""} ${item.is_outbound ? "outbound" : ""}">
+      <div class="gmail-thread-message-header">
+        <div class="email-detail-avatar gmail-thread-avatar">${initials(sender)}</div>
+        <div class="gmail-thread-meta">
+          <div class="gmail-thread-sender">${escapeHTML(sender)}</div>
+          <div class="gmail-thread-subject">${escapeHTML(item.subject || "(no subject)")}</div>
+        </div>
+        <time class="gmail-thread-time">${relative(item.at)}</time>
+      </div>
+      <div class="gmail-thread-message-body">
+        ${body || `<p class="email-muted">No message body.</p>`}
+      </div>
+    </article>
+  `;
+}
+
+function openSMTPNotConfiguredModal() {
+  openModal("Outbound SMTP required", `
+    <div class="smtp-warning">
+      <p>Reply, reply all, and forward require outbound SMTP to be configured before messages can be sent.</p>
+      <div class="smtp-warning-list">
+        <code>OUTBOUND_MODE=relay</code>
+        <code>OUTBOUND_RELAY_HOST=smtp.example.com</code>
+        <code>OUTBOUND_RELAY_PORT=587</code>
+      </div>
+      <p class="form-message">After updating the environment, restart the API service.</p>
+      <div class="form-actions">
+        <button type="button" class="btn btn-primary" id="smtpWarningCloseBtn">OK</button>
+      </div>
+    </div>
+  `);
+  document.getElementById("smtpWarningCloseBtn").onclick = closeModal;
+}
+
+function openReplyModal(email, mode) {
+  const subject = prefixedSubject(email.subject || "", mode);
+  const to = mode === "forward" ? "" : extractEmailAddress(email.from_address || "");
+  const cc = mode === "reply_all" ? removeAddress(email.to_address || "", email.to_address || "") : "";
+  const quote = quotePlainText(email.text_body || htmlToPlainText(email.html_body_sanitized || ""));
+  openModal(mode === "forward" ? "Forward email" : (mode === "reply_all" ? "Reply all" : "Reply"), `
+    <form id="replyForm" class="form-stack">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div>
+          <label class="form-label">To</label>
+          <input class="input" name="to" value="${escapeHTML(to)}" required>
+        </div>
+        <div>
+          <label class="form-label">Subject</label>
+          <input class="input" name="subject" value="${escapeHTML(subject)}" required>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div>
+          <label class="form-label">Cc</label>
+          <input class="input" name="cc" value="${escapeHTML(cc)}" placeholder="Optional">
+        </div>
+        <div>
+          <label class="form-label">Bcc</label>
+          <input class="input" name="bcc" placeholder="Optional">
+        </div>
+      </div>
+      <label class="form-label">Message</label>
+      <textarea class="textarea" name="body_text">${escapeHTML("\n\n" + quote)}</textarea>
+      <div id="replyFormMessage" class="form-message hidden"></div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-ghost" id="cancelReplyBtn">Cancel</button>
+        <button type="submit" class="btn btn-primary">Send Reply</button>
+      </div>
+    </form>
+  `);
+  document.getElementById("cancelReplyBtn").onclick = closeModal;
+  document.getElementById("replyForm").onsubmit = async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const message = document.getElementById("replyFormMessage");
+    try {
+      await api(`/emails/${email.id}/reply`, {
+        method: "POST",
+        body: JSON.stringify({
+          mode,
+          to: splitAddresses(form.elements.to.value),
+          cc: splitAddresses(form.elements.cc.value),
+          bcc: splitAddresses(form.elements.bcc.value),
+          subject: form.elements.subject.value,
+          body_text: form.elements.body_text.value
+        })
+      });
+      closeModal();
+      await renderEmailDetail(email.id);
+    } catch (error) {
+      flash(message, error.message, false);
+    }
+  };
+}
+
+function prefixedSubject(subject, mode) {
+  const value = subject.trim() || "(no subject)";
+  const lower = value.toLowerCase();
+  if (mode === "forward") return lower.startsWith("fwd:") ? value : `Fwd: ${value}`;
+  return lower.startsWith("re:") ? value : `Re: ${value}`;
+}
+
+function splitAddresses(value) {
+  return value.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function extractEmailAddress(value) {
+  const match = value.match(/<([^>]+)>/);
+  return (match ? match[1] : value).trim();
+}
+
+function removeAddress(value, remove) {
+  const target = extractEmailAddress(remove).toLowerCase();
+  return splitAddresses(value).filter((addr) => extractEmailAddress(addr).toLowerCase() !== target).join(", ");
+}
+
+function htmlToPlainText(value) {
+  const tmp = document.createElement("div");
+  tmp.innerHTML = value;
+  return tmp.textContent || tmp.innerText || "";
+}
+
+function quotePlainText(value) {
+  return value.split(/\r?\n/).map((line) => `> ${line}`).join("\n");
 }
 
 async function submitInboxForm(event) {

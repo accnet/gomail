@@ -1045,6 +1045,26 @@ tbody tr:hover {
   text-overflow: ellipsis;
 }
 
+.email-item.unread .email-item-subject,
+.email-item.unread .email-item-from {
+  font-weight: 700;
+}
+
+.email-thread-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  margin-left: 4px;
+  border-radius: 999px;
+  background: var(--color-surface-hover);
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
 .email-item-time {
   font-size: 11px;
   color: var(--color-text-tertiary);
@@ -1135,10 +1155,181 @@ tbody tr:hover {
   text-align: right;
 }
 
+.email-reply-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.email-reply-disabled-note {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.smtp-warning {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.smtp-warning p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+}
+
+.smtp-warning-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--color-border-light);
+  border-radius: 6px;
+  background: var(--color-surface-hover);
+}
+
+.smtp-warning-list code {
+  font-size: 12px;
+  color: var(--color-text);
+  word-break: break-word;
+}
+
 .email-detail-body {
   flex: 1;
   overflow-y: auto;
   padding: 16px 20px;
+}
+
+.gmail-thread,
+.email-thread-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.gmail-thread-message {
+  border: 1px solid var(--color-border-light);
+  border-radius: 8px;
+  background: var(--color-card-bg);
+  overflow: hidden;
+}
+
+.gmail-thread-message.active {
+  border-color: var(--color-primary);
+}
+
+.gmail-thread-message.outbound {
+  background: var(--color-surface-hover);
+}
+
+.gmail-thread-message-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.gmail-thread-avatar {
+  width: 32px;
+  height: 32px;
+  font-size: 12px;
+}
+
+.gmail-thread-meta {
+  flex: 1;
+  min-width: 0;
+}
+
+.gmail-thread-sender {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gmail-thread-subject {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gmail-thread-time {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.gmail-thread-message-body {
+  padding: 14px;
+}
+
+.gmail-thread-html {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--color-text);
+}
+
+.gmail-thread-html img {
+  max-width: 100%;
+  height: auto;
+}
+
+.gmail-thread-plain {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--color-text);
+}
+
+.email-muted {
+  margin: 0;
+  font-size: 13px;
+  color: var(--color-text-tertiary);
+}
+
+.email-thread-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border-light);
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.email-thread-item.active {
+  border-color: var(--color-primary);
+  background: var(--color-surface-hover);
+}
+
+.email-thread-item div {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.email-thread-item strong,
+.email-thread-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.email-thread-item time {
+  flex-shrink: 0;
+  color: var(--color-text-tertiary);
 }
 
 /* HTML body - full width email content */
@@ -1975,6 +2166,90 @@ tbody tr:hover {
 .modal-body {
   padding: 20px 24px 24px;
   overflow: visible;
+}
+
+/* --- Reply Form (Modal) --- */
+.form-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.form-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-tertiary);
+  margin-bottom: 0;
+}
+
+.form-stack .input,
+.form-stack .textarea {
+  width: 100%;
+  padding: 9px 12px;
+  background: var(--color-input-bg);
+  border: 1px solid var(--color-input-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  box-sizing: border-box;
+}
+
+.form-stack .input:focus,
+.form-stack .textarea:focus {
+  border-color: var(--color-input-focus);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+.form-stack .input::placeholder,
+.form-stack .textarea::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+.form-stack .textarea {
+  resize: vertical;
+  min-height: 160px;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  tab-size: 4;
+}
+
+.form-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px solid var(--color-border-light);
+}
+
+.form-message {
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+}
+
+.form-message.hidden {
+  display: none;
+}
+
+.form-message.success {
+  background: var(--color-success-light);
+  color: var(--color-success);
+  border: 1px solid rgba(22, 163, 74, 0.15);
+}
+
+.form-message.error {
+  background: var(--color-danger-light);
+  color: var(--color-danger);
+  border: 1px solid rgba(220, 38, 38, 0.15);
 }
 
 /* --- Theme Icons --- */
