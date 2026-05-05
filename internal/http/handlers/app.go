@@ -82,30 +82,30 @@ func (a App) Router() *gin.Engine {
 	protected.GET("/me", a.me)
 	protected.POST("/auth/logout", a.logout)
 	protected.POST("/auth/change-password", a.changePassword)
-	protected.GET("/domains", a.listDomains)
-	protected.POST("/domains", a.createDomain)
-	protected.GET("/domains/:id", a.getDomain)
-	protected.POST("/domains/:id/verify", a.verifyDomain)
-	protected.POST("/domains/:id/verify-a", a.verifyDomainA)
-	protected.POST("/domains/:id/verify-mx", a.verifyDomainMX)
-	protected.GET("/domains/:id/email-auth", a.getDomainEmailAuth)
-	protected.POST("/domains/:id/email-auth/dkim/generate", a.generateDomainDKIM)
-	protected.POST("/domains/:id/email-auth/verify", a.verifyDomainEmailAuth)
-	protected.DELETE("/domains/:id", a.deleteDomain)
+	protected.GET("/domains", mw.RequireTeamScope(teams.ScopeDomainManage), a.listDomains)
+	protected.POST("/domains", mw.RequireTeamScope(teams.ScopeDomainManage), a.createDomain)
+	protected.GET("/domains/:id", mw.RequireTeamScope(teams.ScopeDomainManage), a.getDomain)
+	protected.POST("/domains/:id/verify", mw.RequireTeamScope(teams.ScopeDomainManage), a.verifyDomain)
+	protected.POST("/domains/:id/verify-a", mw.RequireTeamScope(teams.ScopeDomainManage), a.verifyDomainA)
+	protected.POST("/domains/:id/verify-mx", mw.RequireTeamScope(teams.ScopeDomainManage), a.verifyDomainMX)
+	protected.GET("/domains/:id/email-auth", mw.RequireTeamScope(teams.ScopeDomainManage), a.getDomainEmailAuth)
+	protected.POST("/domains/:id/email-auth/dkim/generate", mw.RequireTeamScope(teams.ScopeDomainManage), a.generateDomainDKIM)
+	protected.POST("/domains/:id/email-auth/verify", mw.RequireTeamScope(teams.ScopeDomainManage), a.verifyDomainEmailAuth)
+	protected.DELETE("/domains/:id", mw.RequireTeamScope(teams.ScopeDomainManage), a.deleteDomain)
 
-	protected.GET("/inboxes", a.listInboxes)
-	protected.POST("/inboxes", a.createInbox)
-	protected.PATCH("/inboxes/:id", a.patchInbox)
-	protected.DELETE("/inboxes/:id", a.deleteInbox)
-	protected.GET("/conversations", a.listConversations)
-	protected.GET("/emails", a.listEmails)
-	protected.GET("/emails/:id", a.getEmail)
-	protected.GET("/emails/:id/thread", a.getEmailThread)
-	protected.GET("/emails/:id/reply-status", a.getEmailReplyStatus)
-	protected.POST("/emails/:id/reply", a.replyEmail)
-	protected.PATCH("/emails/:id/read", a.markRead)
-	protected.DELETE("/emails/:id", a.deleteEmail)
-	protected.GET("/emails/:id/attachments/:attachmentId/download", a.downloadAttachment)
+	protected.GET("/inboxes", mw.RequireTeamScope(teams.ScopeEmailAccess), a.listInboxes)
+	protected.POST("/inboxes", mw.RequireTeamScope(teams.ScopeEmailManage), a.createInbox)
+	protected.PATCH("/inboxes/:id", mw.RequireTeamScope(teams.ScopeEmailManage), a.patchInbox)
+	protected.DELETE("/inboxes/:id", mw.RequireTeamScope(teams.ScopeEmailManage), a.deleteInbox)
+	protected.GET("/conversations", mw.RequireTeamScope(teams.ScopeEmailAccess), a.listConversations)
+	protected.GET("/emails", mw.RequireTeamScope(teams.ScopeEmailAccess), a.listEmails)
+	protected.GET("/emails/:id", mw.RequireTeamScope(teams.ScopeEmailAccess), a.getEmail)
+	protected.GET("/emails/:id/thread", mw.RequireTeamScope(teams.ScopeEmailAccess), a.getEmailThread)
+	protected.GET("/emails/:id/reply-status", mw.RequireTeamScope(teams.ScopeEmailManage), a.getEmailReplyStatus)
+	protected.POST("/emails/:id/reply", mw.RequireTeamScope(teams.ScopeEmailManage), a.replyEmail)
+	protected.PATCH("/emails/:id/read", mw.RequireTeamScope(teams.ScopeEmailAccess), a.markRead)
+	protected.DELETE("/emails/:id", mw.RequireTeamScope(teams.ScopeEmailManage), a.deleteEmail)
+	protected.GET("/emails/:id/attachments/:attachmentId/download", mw.RequireTeamScope(teams.ScopeEmailAccess), a.downloadAttachment)
 	protected.GET("/dashboard", a.dashboard)
 	protected.GET("/outbound/status", a.outboundStatus)
 	protected.GET("/settings/general", a.getGeneralSettings)
@@ -125,14 +125,14 @@ func (a App) Router() *gin.Engine {
 	tg.POST("", a.createTeam)
 	tg.GET("", a.listTeams)
 	tg.GET("/:id", a.getTeam)
-	tg.PATCH("/:id", a.updateTeam)
+	tg.PATCH("/:id", mw.RequireTeamScope(teams.ScopeMemberManage), a.updateTeam)
 	tg.DELETE("/:id", a.deleteTeam)
-	tg.GET("/:id/members", a.listMembers)
-	tg.PATCH("/:id/members/:userId", a.updateMember)
-	tg.DELETE("/:id/members/:userId", a.removeMember)
-	tg.POST("/:id/invites", a.inviteMember)
-	tg.GET("/:id/invites", a.listInvites)
-	tg.DELETE("/:id/invites/:inviteId", a.cancelInvite)
+	tg.GET("/:id/members", mw.RequireTeamScope(teams.ScopeMemberManage), a.listMembers)
+	tg.PATCH("/:id/members/:userId", mw.RequireTeamScope(teams.ScopeMemberManage), a.updateMember)
+	tg.DELETE("/:id/members/:userId", mw.RequireTeamScope(teams.ScopeMemberManage), a.removeMember)
+	tg.POST("/:id/invites", mw.RequireTeamScope(teams.ScopeMemberManage), a.inviteMember)
+	tg.GET("/:id/invites", mw.RequireTeamScope(teams.ScopeMemberManage), a.listInvites)
+	tg.DELETE("/:id/invites/:inviteId", mw.RequireTeamScope(teams.ScopeMemberManage), a.cancelInvite)
 
 	// Invite public preview + registration (no auth needed for preview/register)
 	api.GET("/team-invites/:token", a.getInviteInfo)
@@ -182,7 +182,7 @@ func (a App) register(c *gin.Context) {
 		response.Error(c, http.StatusInternalServerError, "hash_failed", "could not hash password")
 		return
 	}
-	user := db.User{Email: strings.ToLower(req.Email), Name: req.Name, PasswordHash: hash, IsActive: false, MaxDomains: 5, MaxInboxes: 50, MaxMembers: 5, MaxAttachmentSizeMB: 25, MaxMessageSizeMB: 25, MaxStorageBytes: 10 * 1024 * 1024 * 1024}
+	user := db.User{Email: strings.ToLower(req.Email), Name: req.Name, PasswordHash: hash, IsActive: false, CanCreateWorkspaces: true, MaxDomains: 5, MaxInboxes: 50, MaxMembers: 5, MaxAttachmentSizeMB: 25, MaxMessageSizeMB: 25, MaxStorageBytes: 10 * 1024 * 1024 * 1024}
 	if err := a.DB.Create(&user).Error; err != nil {
 		if isDuplicateKeyError(err) {
 			response.Error(c, http.StatusConflict, "email_exists", "email already exists")
@@ -226,7 +226,13 @@ func (a App) login(c *gin.Context) {
 }
 
 func (a App) me(c *gin.Context) {
-	response.OK(c, mw.CurrentUser(c))
+	user := mw.CurrentUser(c)
+	if a.Teams != nil {
+		if next, err := a.Teams.ReconcileInviteeAccess(c.Request.Context(), user); err == nil {
+			user = next
+		}
+	}
+	response.OK(c, user)
 }
 
 func (a App) refresh(c *gin.Context) {

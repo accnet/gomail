@@ -12,6 +12,7 @@ import (
 	"gomail/internal/db"
 
 	"github.com/google/uuid"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -22,6 +23,7 @@ type TeamSummary struct {
 	Name        string    `json:"name"`
 	OwnerID     uuid.UUID `json:"owner_id"`
 	Role        string    `json:"role"`
+	Permissions []string  `json:"permissions"`
 	MemberCount int       `json:"member_count"`
 	IsDefault   bool      `json:"is_default"`
 	CanDelete   bool      `json:"can_delete"`
@@ -57,22 +59,23 @@ type InviteInfo struct {
 // ── Errors ─────────────────────────────────────────────────────────────────
 
 var (
-	ErrTeamNotFound         = errors.New("team not found")
-	ErrNotOwner             = errors.New("only the team owner can perform this action")
-	ErrOwnerCannotLeave     = errors.New("owner cannot leave the team")
-	ErrOwnerCannotBeRemoved = errors.New("owner cannot be removed")
-	ErrOwnerCannotBeDemoted = errors.New("owner cannot be demoted")
-	ErrDefaultCannotDelete  = errors.New("default workspace cannot be deleted")
-	ErrAlreadyMember        = errors.New("user is already a member of this team")
-	ErrNotMember            = errors.New("user is not a member of this team")
-	ErrInviteNotFound       = errors.New("invite not found")
-	ErrInviteExpired        = errors.New("invite has expired")
-	ErrInviteEmailMismatch  = errors.New("invite email does not match current user email")
-	ErrInviteNotPending     = errors.New("invite is not in pending status")
-	ErrDuplicateInvite      = errors.New("a pending invite for this email already exists")
-	ErrInvalidRole          = errors.New("invalid role")
-	ErrMissingScope         = errors.New("missing required scope")
-	ErrMemberQuotaExceeded  = errors.New("member quota exceeded")
+	ErrTeamNotFound          = errors.New("team not found")
+	ErrNotOwner              = errors.New("only the team owner can perform this action")
+	ErrOwnerCannotLeave      = errors.New("owner cannot leave the team")
+	ErrOwnerCannotBeRemoved  = errors.New("owner cannot be removed")
+	ErrOwnerCannotBeDemoted  = errors.New("owner cannot be demoted")
+	ErrDefaultCannotDelete   = errors.New("default workspace cannot be deleted")
+	ErrAlreadyMember         = errors.New("user is already a member of this team")
+	ErrNotMember             = errors.New("user is not a member of this team")
+	ErrInviteNotFound        = errors.New("invite not found")
+	ErrInviteExpired         = errors.New("invite has expired")
+	ErrInviteEmailMismatch   = errors.New("invite email does not match current user email")
+	ErrInviteNotPending      = errors.New("invite is not in pending status")
+	ErrDuplicateInvite       = errors.New("a pending invite for this email already exists")
+	ErrInvalidRole           = errors.New("invalid role")
+	ErrMissingScope          = errors.New("missing required scope")
+	ErrMemberQuotaExceeded   = errors.New("member quota exceeded")
+	ErrCreateWorkspaceDenied = errors.New("workspace creation is not allowed for this account")
 )
 
 // ── Service ────────────────────────────────────────────────────────────────
@@ -83,6 +86,31 @@ type Service struct {
 
 func NewService(db *gorm.DB) *Service {
 	return &Service{DB: db}
+}
+
+func (s *Service) ReconcileInviteeAccess(ctx context.Context, user db.User) (db.User, error) {
+	if user.IsAdmin || user.IsSuperAdmin {
+		return user, nil
+	}
+	var externalMemberships int64
+	if err := s.DB.WithContext(ctx).
+		Table("team_members").
+		Joins("JOIN teams ON teams.id = team_members.team_id AND teams.deleted_at IS NULL").
+		Where("team_members.user_id = ? AND team_members.role != ? AND team_members.deleted_at IS NULL AND teams.owner_id != ?", user.ID, db.TeamRoleOwner, user.ID).
+		Count(&externalMemberships).Error; err != nil {
+		return user, err
+	}
+	if externalMemberships == 0 || !user.CanCreateWorkspaces {
+		return user, nil
+	}
+	if err := s.DB.WithContext(ctx).
+		Model(&db.User{}).
+		Where("id = ?", user.ID).
+		Update("can_create_workspaces", false).Error; err != nil {
+		return user, err
+	}
+	user.CanCreateWorkspaces = false
+	return user, nil
 }
 
 // EnsureDefaultWorkspaces gives every user an owned workspace and moves any
@@ -102,6 +130,9 @@ func (s *Service) EnsureDefaultWorkspaces(ctx context.Context) error {
 }
 
 func (s *Service) EnsureDefaultWorkspace(ctx context.Context, user db.User) (*db.Team, error) {
+	if !user.CanCreateWorkspaces {
+		return nil, nil
+	}
 	var team db.Team
 	err := s.DB.WithContext(ctx).
 		Joins("JOIN team_members ON team_members.team_id = teams.id AND team_members.deleted_at IS NULL").
@@ -187,6 +218,13 @@ func (s *Service) CreateTeam(ctx context.Context, userID uuid.UUID, name string)
 	if name == "" {
 		return nil, errors.New("team name is required")
 	}
+	var user db.User
+	if err := s.DB.WithContext(ctx).First(&user, "id = ? AND deleted_at IS NULL", userID).Error; err != nil {
+		return nil, err
+	}
+	if !user.CanCreateWorkspaces {
+		return nil, ErrCreateWorkspaceDenied
+	}
 
 	team := &db.Team{
 		Name:    name,
@@ -227,29 +265,47 @@ func (s *Service) GetTeam(ctx context.Context, userID, teamID uuid.UUID) (*db.Te
 }
 
 func (s *Service) ListTeams(ctx context.Context, userID uuid.UUID) ([]TeamSummary, error) {
+	var user db.User
+	if err := s.DB.WithContext(ctx).First(&user, "id = ? AND deleted_at IS NULL", userID).Error; err != nil {
+		return nil, err
+	}
+	user, err := s.ReconcileInviteeAccess(ctx, user)
+	if err != nil {
+		return nil, err
+	}
+
 	var results []struct {
 		db.Team
 		Role        string `json:"role"`
-		MemberCount int    `json:"member_count"`
+		Permissions datatypes.JSON
+		MemberCount int `json:"member_count"`
 	}
 
-	err := s.DB.WithContext(ctx).
+	q := s.DB.WithContext(ctx).
 		Table("teams").
-		Select("teams.*, team_members.role, (SELECT COUNT(*) FROM team_members tm2 WHERE tm2.team_id = teams.id AND tm2.deleted_at IS NULL) as member_count").
+		Select("teams.*, team_members.role, team_members.permissions, (SELECT COUNT(*) FROM team_members tm2 WHERE tm2.team_id = teams.id AND tm2.deleted_at IS NULL) as member_count").
 		Joins("JOIN team_members ON team_members.team_id = teams.id AND team_members.deleted_at IS NULL").
-		Where("team_members.user_id = ? AND teams.deleted_at IS NULL", userID).
-		Scan(&results).Error
+		Where("team_members.user_id = ? AND teams.deleted_at IS NULL", userID)
+	if !user.CanCreateWorkspaces {
+		q = q.Where("team_members.role != ?", db.TeamRoleOwner)
+	}
+	err = q.Scan(&results).Error
 	if err != nil {
 		return nil, err
 	}
 
 	summaries := make([]TeamSummary, len(results))
 	for i, r := range results {
+		scopes, _ := ParseScopes(r.Permissions)
+		if r.Role == db.TeamRoleOwner {
+			scopes = DefaultScopes(db.TeamRoleOwner)
+		}
 		summaries[i] = TeamSummary{
 			ID:          r.ID,
 			Name:        r.Name,
 			OwnerID:     r.OwnerID,
 			Role:        r.Role,
+			Permissions: scopes,
 			MemberCount: r.MemberCount,
 			IsDefault:   r.IsDefault,
 			CanDelete:   !r.IsDefault && r.Role == db.TeamRoleOwner,
@@ -322,13 +378,16 @@ func (s *Service) GetMember(ctx context.Context, teamID, userID uuid.UUID) (*db.
 }
 
 func (s *Service) ListMembers(ctx context.Context, actorID, teamID uuid.UUID) ([]TeamMemberView, error) {
-	// Actor must be a member
-	if _, err := s.getActiveMember(ctx, teamID, actorID); err != nil {
+	actor, err := s.getActiveMember(ctx, teamID, actorID)
+	if err != nil {
 		return nil, err
+	}
+	if actor.Role != db.TeamRoleOwner && !MemberHasScope(*actor, ScopeMemberManage) {
+		return nil, ErrMissingScope
 	}
 
 	var views []TeamMemberView
-	err := s.DB.WithContext(ctx).
+	err = s.DB.WithContext(ctx).
 		Table("team_members").
 		Select("team_members.*, users.name as user_name, users.email as user_email").
 		Joins("JOIN users ON users.id = team_members.user_id").
@@ -642,9 +701,12 @@ func (s *Service) CancelInvite(ctx context.Context, actorID, teamID, inviteID uu
 }
 
 func (s *Service) ListPendingInvites(ctx context.Context, actorID, teamID uuid.UUID) ([]InviteInfo, error) {
-	_, err := s.getActiveMember(ctx, teamID, actorID)
+	actor, err := s.getActiveMember(ctx, teamID, actorID)
 	if err != nil {
 		return nil, err
+	}
+	if actor.Role != db.TeamRoleOwner && !MemberHasScope(*actor, ScopeMemberManage) {
+		return nil, ErrMissingScope
 	}
 
 	var invites []db.TeamInvite

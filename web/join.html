@@ -31,23 +31,24 @@
         <!-- Not logged in -->
         <div id="guest-section" class="hidden">
           <div class="tabs">
-            <button class="tab active" data-tab="login-tab">Login</button>
-            <button class="tab" data-tab="register-tab">Create Account</button>
+            <button class="tab active" data-tab="register-tab">Create Account</button>
+            <button class="tab" data-tab="login-tab">Login</button>
           </div>
 
-          <div id="login-tab" class="tab-content">
-            <label>Email <input id="login-email" type="email" readonly /></label>
-            <label>Password <input id="login-password" type="password" autofocus /></label>
-            <button id="login-btn" class="btn btn-primary btn-full">Login & Accept</button>
-            <div id="login-error" class="error hidden"></div>
-          </div>
-
-          <div id="register-tab" class="tab-content hidden">
-            <label>Name <input id="register-name" type="text" /></label>
+          <div id="register-tab" class="tab-content">
             <label>Email <input id="register-email" type="email" readonly /></label>
-            <label>Password <input id="register-password" type="password" minlength="8" /></label>
+            <label>Password <input id="register-password" type="password" minlength="8" autofocus /></label>
+            <label>Confirm Password <input id="register-password-confirm" type="password" minlength="8" /></label>
+            <label>Name <input id="register-name" type="text" autocomplete="name" /></label>
             <button id="register-btn" class="btn btn-primary btn-full">Create Account & Join</button>
             <div id="register-error" class="error hidden"></div>
+          </div>
+
+          <div id="login-tab" class="tab-content hidden">
+            <label>Email <input id="login-email" type="email" readonly /></label>
+            <label>Password <input id="login-password" type="password" /></label>
+            <button id="login-btn" class="btn btn-primary btn-full">Login & Accept</button>
+            <div id="login-error" class="error hidden"></div>
           </div>
         </div>
 

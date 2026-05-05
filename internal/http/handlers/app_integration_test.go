@@ -80,6 +80,7 @@ func createUser(t *testing.T, database *gorm.DB, email string, active bool, admi
 		IsActive:            active,
 		IsAdmin:             admin,
 		IsSuperAdmin:        super,
+		CanCreateWorkspaces: true,
 		MaxDomains:          10,
 		MaxInboxes:          10,
 		MaxMessageSizeMB:    25,
@@ -246,6 +247,85 @@ func TestInviteMemberSendsEmailFromSaaSDomain(t *testing.T) {
 	}
 	if !strings.Contains(captured.TextBody, "https://mail.saas.test/app/join.html?token="+body.Token) {
 		t.Fatalf("invite body missing join link: %s", captured.TextBody)
+	}
+}
+
+func TestInviteRegisterCannotCreateWorkspace(t *testing.T) {
+	app, database := newTestApp(t)
+	app.Teams = teamservice.NewService(database)
+
+	owner := createUser(t, database, "workspace-owner@test.local", true, true, false)
+	team, err := app.Teams.CreateTeam(context.Background(), owner.ID, "Locked Team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	invite, err := app.Teams.InviteMember(context.Background(), owner.ID, team.ID, "invited@test.local", db.TeamRoleMember, []string{teamservice.ScopeEmailAccess})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	router := app.Router()
+	registerResp := doJSON(t, router, http.MethodPost, "/api/team-invites/"+invite.Token+"/register", map[string]any{
+		"email":    "invited@test.local",
+		"password": "password123",
+	}, "")
+	if registerResp.Code != http.StatusCreated {
+		t.Fatalf("invite register status = %d body=%s", registerResp.Code, registerResp.Body.String())
+	}
+
+	var registerBody struct {
+		AccessToken string  `json:"access_token"`
+		User        db.User `json:"user"`
+	}
+	if err := json.Unmarshal(registerResp.Body.Bytes(), &registerBody); err != nil {
+		t.Fatal(err)
+	}
+	if registerBody.User.CanCreateWorkspaces {
+		t.Fatal("invited user should not be allowed to create workspaces")
+	}
+
+	var ownedTeams int64
+	if err := database.Model(&db.Team{}).Where("owner_id = ? AND deleted_at IS NULL", registerBody.User.ID).Count(&ownedTeams).Error; err != nil {
+		t.Fatal(err)
+	}
+	if ownedTeams != 0 {
+		t.Fatalf("invited user owns %d workspaces, want 0", ownedTeams)
+	}
+
+	createResp := doJSON(t, router, http.MethodPost, "/api/teams", map[string]any{"name": "Should Fail"}, registerBody.AccessToken)
+	if createResp.Code != http.StatusForbidden {
+		t.Fatalf("create workspace status = %d body=%s", createResp.Code, createResp.Body.String())
+	}
+}
+
+func TestTeamScopeMiddlewareRestrictsGrantedPermissions(t *testing.T) {
+	app, database := newTestApp(t)
+	app.Teams = teamservice.NewService(database)
+
+	owner := createUser(t, database, "scope-owner@test.local", true, true, false)
+	member := createUser(t, database, "scope-member@test.local", true, false, false)
+	team, err := app.Teams.CreateTeam(context.Background(), owner.ID, "Scoped Team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Create(&db.TeamMember{
+		TeamID:      team.ID,
+		UserID:      member.ID,
+		Role:        db.TeamRoleMember,
+		Permissions: teamservice.MarshalScopes([]string{teamservice.ScopeEmailAccess}),
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	router := app.Router()
+	token := bearerToken(t, app, member)
+	forbidden := doJSONWithTeam(t, router, http.MethodPost, "/api/domains", map[string]any{"name": "blocked.test"}, token, team.ID.String())
+	if forbidden.Code != http.StatusForbidden {
+		t.Fatalf("domain create status = %d body=%s", forbidden.Code, forbidden.Body.String())
+	}
+	allowed := doJSONWithTeam(t, router, http.MethodGet, "/api/inboxes", nil, token, team.ID.String())
+	if allowed.Code != http.StatusOK {
+		t.Fatalf("inbox list status = %d body=%s", allowed.Code, allowed.Body.String())
 	}
 }
 

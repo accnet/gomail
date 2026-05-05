@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -30,6 +31,10 @@ func (a App) createTeam(c *gin.Context) {
 	user := mw.CurrentUser(c)
 	team, err := a.Teams.CreateTeam(c.Request.Context(), user.ID, req.Name)
 	if err != nil {
+		if errors.Is(err, teams.ErrCreateWorkspaceDenied) {
+			response.Error(c, http.StatusForbidden, "workspace_creation_denied", err.Error())
+			return
+		}
 		response.Error(c, http.StatusBadRequest, "create_team_failed", err.Error())
 		return
 	}
@@ -379,6 +384,11 @@ func (a App) inviteRegister(c *gin.Context) {
 		response.Error(c, http.StatusBadRequest, "email_mismatch", "email does not match invite")
 		return
 	}
+	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		req.Name = strings.Split(req.Email, "@")[0]
+	}
 
 	// Create user (active) + accept invite in one transaction
 	hash, err := auth.HashPassword(req.Password)
@@ -392,6 +402,7 @@ func (a App) inviteRegister(c *gin.Context) {
 		Name:                req.Name,
 		PasswordHash:        hash,
 		IsActive:            true,
+		CanCreateWorkspaces: false,
 		MaxDomains:          5,
 		MaxInboxes:          50,
 		MaxMembers:          5,
@@ -401,16 +412,15 @@ func (a App) inviteRegister(c *gin.Context) {
 	}
 
 	err = a.DB.WithContext(c.Request.Context()).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(&user).Error; err != nil {
+		if err := tx.Select("*").Create(&user).Error; err != nil {
 			return err
 		}
-		// Temporarily set Teams DB to this tx for AcceptInvite
+		if err := tx.Model(&user).Update("can_create_workspaces", false).Error; err != nil {
+			return err
+		}
+		user.CanCreateWorkspaces = false
 		origDB := a.Teams.DB
 		a.Teams.DB = tx
-		if _, ensureErr := a.Teams.EnsureDefaultWorkspace(c.Request.Context(), user); ensureErr != nil {
-			a.Teams.DB = origDB
-			return ensureErr
-		}
 		_, acceptErr := a.Teams.AcceptInvite(c.Request.Context(), user.ID, token)
 		a.Teams.DB = origDB
 		return acceptErr

@@ -1,64 +1,468 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>GoMail</title>
-    <style>
-      :root {
-        color-scheme: light;
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        background: #f7f3ea;
-        color: #202124;
-      }
-      body {
-        margin: 0;
-        min-height: 100vh;
-        display: grid;
-        place-items: center;
-      }
-      main {
-        width: min(720px, calc(100% - 40px));
-      }
-      h1 {
-        margin: 0 0 12px;
-        font-size: 72px;
-        line-height: 0.95;
-        letter-spacing: 0;
-      }
-      p {
-        margin: 0 0 24px;
-        max-width: 560px;
-        color: #5b605f;
-        font-size: 18px;
-        line-height: 1.6;
-      }
-      a {
-        display: inline-flex;
-        align-items: center;
-        min-height: 42px;
-        padding: 0 18px;
-        border-radius: 6px;
-        background: #1f6f64;
-        color: white;
-        font-weight: 700;
-        text-decoration: none;
-      }
-      @media (max-width: 560px) {
-        h1 {
-          font-size: 44px;
-        }
-        p {
-          font-size: 16px;
-        }
-      }
-    </style>
-  </head>
-  <body>
-    <main>
-      <h1>GoMail</h1>
-      <p>Inbound email, custom domains, and static website hosting from one self-hosted control panel.</p>
-      <a href="/app/">Open app</a>
-    </main>
-  </body>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GoMail — Self-Hosted Email SaaS</title>
+<meta name="description" content="Self-hosted email platform with custom domains, catch-all mailboxes, SMTP relay, API keys, real-time notifications, and static website hosting.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+/* ===== Reset & Variables ===== */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --c-bg:#06060d;
+  --c-surface:#0d0d1a;
+  --c-surface2:#13132a;
+  --c-border:#1e1e3a;
+  --c-border-light:#252545;
+  --c-text:#f0f0f5;
+  --c-text2:#a0a0c0;
+  --c-text3:#606080;
+  --c-primary:#00d4ff;
+  --c-primary-hover:#33ddff;
+  --c-primary-glow:rgba(0,212,255,.25);
+  --c-primary-light:rgba(0,212,255,.08);
+  --c-accent:#a855f7;
+  --c-accent-glow:rgba(168,85,247,.25);
+  --c-success:#22c55e;
+  --c-warning:#f59e0b;
+  --c-neon-1:#00d4ff;
+  --c-neon-2:#a855f7;
+  --c-neon-3:#f472b6;
+  --radius:12px;
+  --radius-sm:8px;
+  --max-w:1152px;
+  scroll-behavior:smooth;
+}
+html{font-size:16px;-webkit-font-smoothing:antialiased}
+body{
+  font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  background:var(--c-bg);color:var(--c-text);line-height:1.6;
+  overflow-x:hidden;
+}
+
+/* ===== Typography ===== */
+h1{font-size:clamp(36px,5vw,56px);font-weight:800;line-height:1.1;letter-spacing:-0.02em}
+h2{font-size:clamp(28px,4vw,40px);font-weight:700;line-height:1.2;letter-spacing:-0.01em}
+h3{font-size:20px;font-weight:600;line-height:1.3;color:var(--c-text)}
+p{color:var(--c-text2);font-size:17px;line-height:1.7}
+
+/* ===== Neon Gradient Text ===== */
+.neon-text{
+  background:linear-gradient(135deg,var(--c-neon-1) 0%,var(--c-neon-2) 50%,var(--c-neon-3) 100%);
+  -webkit-background-clip:text;
+  -webkit-text-fill-color:transparent;
+  background-clip:text;
+  filter:drop-shadow(0 0 20px var(--c-primary-glow)) drop-shadow(0 0 40px var(--c-accent-glow));
+}
+.neon-text-sub{
+  background:linear-gradient(135deg,var(--c-neon-2) 0%,var(--c-neon-3) 100%);
+  -webkit-background-clip:text;
+  -webkit-text-fill-color:transparent;
+  background-clip:text;
+  filter:drop-shadow(0 0 12px var(--c-accent-glow));
+}
+
+/* ===== Layout ===== */
+.container{width:min(var(--max-w),100% - 48px);margin:0 auto}
+.section{padding:96px 0}
+
+/* ===== Buttons ===== */
+.btn{
+  display:inline-flex;align-items:center;gap:8px;
+  padding:14px 28px;font-size:15px;font-weight:600;
+  border-radius:var(--radius-sm);text-decoration:none;
+  transition:all 0.25s;cursor:pointer;border:none;
+  white-space:nowrap;
+}
+.btn-primary{
+  background:linear-gradient(135deg,var(--c-neon-1),var(--c-neon-2));
+  color:#fff;box-shadow:0 0 20px var(--c-primary-glow);
+}
+.btn-primary:hover{
+  transform:translateY(-2px);
+  box-shadow:0 0 30px var(--c-primary-glow),0 0 60px var(--c-accent-glow);
+}
+.btn-outline{
+  background:transparent;color:var(--c-primary);
+  border:2px solid var(--c-primary);
+  box-shadow:0 0 8px var(--c-primary-glow),inset 0 0 8px var(--c-primary-glow);
+}
+.btn-outline:hover{
+  background:var(--c-primary-light);
+  box-shadow:0 0 20px var(--c-primary-glow),inset 0 0 16px var(--c-primary-glow);
+}
+.btn-lg{padding:18px 36px;font-size:16px;border-radius:var(--radius)}
+
+/* ===== Header ===== */
+.header{
+  position:sticky;top:0;z-index:100;
+  background:rgba(6,6,13,.88);backdrop-filter:blur(16px);
+  border-bottom:1px solid var(--c-border);
+}
+.header .container{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:16px 0;
+}
+.logo{
+  display:flex;align-items:center;gap:10px;
+  font-size:22px;font-weight:700;color:var(--c-text);
+  text-decoration:none;
+}
+.logo-icon{
+  width:36px;height:36px;background:var(--c-primary);
+  border-radius:10px;display:grid;place-items:center;
+}
+.logo-icon svg{width:20px;height:20px}
+.header-cta{display:flex;align-items:center;gap:12px}
+.header-link{font-size:14px;font-weight:500;color:var(--c-text2);text-decoration:none;padding:8px 12px;border-radius:6px;transition:all .15s}
+.header-link:hover{color:var(--c-text);background:var(--c-border)}
+
+/* ===== Hero ===== */
+.hero{padding:120px 0 80px;text-align:center}
+.hero .container{max-width:800px}
+.hero-badge{
+  display:inline-flex;align-items:center;gap:8px;
+  padding:6px 16px;background:var(--c-primary-light);
+  color:var(--c-primary);font-size:13px;font-weight:600;
+  border-radius:99px;margin-bottom:24px;
+  border:1px solid var(--c-border);
+}
+.hero-badge-dot{width:8px;height:8px;background:var(--c-success);border-radius:50%}
+.hero h1{margin-bottom:20px}
+.hero p{font-size:19px;max-width:600px;margin:0 auto 36px}
+.hero-actions{display:flex;gap:16px;justify-content:center;flex-wrap:wrap}
+
+/* ===== Features ===== */
+.features-section{background:var(--c-surface);border-top:1px solid var(--c-border);border-bottom:1px solid var(--c-border)}
+.features-section .section-header{text-align:center;margin-bottom:64px}
+.features-section .section-header p{max-width:560px;margin:12px auto 0}
+.features-grid{
+  display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));
+  gap:32px;
+}
+.feature-card{
+  padding:32px;background:var(--c-surface2);border-radius:var(--radius);
+  border:1px solid var(--c-border);transition:transform .2s,box-shadow .2s,border-color .2s;
+}
+.feature-card:hover{
+  transform:translateY(-2px);
+  border-color:var(--c-primary);
+  box-shadow:0 0 24px var(--c-primary-glow);
+}
+.feature-icon{
+  width:48px;height:48px;border-radius:var(--radius-sm);
+  display:grid;place-items:center;margin-bottom:20px;
+}
+.feature-icon.mail{background:rgba(0,212,255,.12);color:#00d4ff}
+.feature-icon.smtp{background:rgba(245,158,11,.12);color:#f59e0b}
+.feature-icon.site{background:rgba(34,197,94,.12);color:#22c55e}
+.feature-icon.api{background:rgba(168,85,247,.12);color:#a855f7}
+.feature-icon.realtime{background:rgba(244,114,182,.12);color:#f472b6}
+.feature-icon.admin{background:rgba(56,189,248,.12);color:#38bdf8}
+.feature-card h3{margin-bottom:8px}
+.feature-card p{font-size:15px;color:var(--c-text2)}
+
+/* ===== How It Works ===== */
+.steps{display:grid;grid-template-columns:repeat(3,1fr);gap:32px;margin-top:48px}
+.step{
+  text-align:center;padding:32px 24px;
+  background:var(--c-surface2);border-radius:var(--radius);
+  border:1px solid var(--c-border);
+}
+.step-number{
+  width:48px;height:48px;border-radius:50%;
+  background:linear-gradient(135deg,var(--c-neon-1),var(--c-neon-2));
+  color:#fff;
+  display:grid;place-items:center;
+  font-size:20px;font-weight:700;
+  margin:0 auto 16px;
+  box-shadow:0 0 16px var(--c-primary-glow);
+}
+.step h3{margin-bottom:8px}
+.step p{font-size:15px}
+
+/* ===== Stats ===== */
+.stats{
+  background:linear-gradient(135deg,var(--c-surface2),var(--c-surface));
+  color:#fff;padding:64px 0;
+  border-top:1px solid var(--c-border);
+  border-bottom:1px solid var(--c-border);
+}
+.stats-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:32px;text-align:center}
+.stat-number{
+  font-size:40px;font-weight:800;line-height:1;
+  background:linear-gradient(135deg,var(--c-neon-1),var(--c-neon-2));
+  -webkit-background-clip:text;
+  -webkit-text-fill-color:transparent;
+  background-clip:text;
+  filter:drop-shadow(0 0 12px var(--c-primary-glow));
+}
+.stat-label{font-size:15px;opacity:.85;margin-top:8px}
+
+/* ===== CTA ===== */
+.cta{text-align:center}
+.cta .container{max-width:640px}
+.cta h2{margin-bottom:16px}
+.cta p{margin-bottom:32px}
+
+/* ===== Footer ===== */
+.footer{
+  border-top:1px solid var(--c-border);
+  padding:48px 0;text-align:center;
+}
+.footer p{font-size:14px;color:var(--c-text3)}
+
+/* ===== Responsive ===== */
+@media(max-width:768px){
+  .section{padding:64px 0}
+  .hero{padding:80px 0 48px}
+  .steps{grid-template-columns:1fr}
+  .stats-grid{grid-template-columns:1fr;gap:24px}
+  .header-nav{display:none}
+}
+@media(max-width:480px){
+  .container{width:calc(100% - 32px)}
+  .features-grid{grid-template-columns:1fr}
+  .hero-actions{flex-direction:column;align-items:center}
+}
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<header class="header">
+  <div class="container">
+    <a href="#" class="logo">
+      <span class="logo-icon">
+        <svg width="20" height="20" viewBox="0 0 40 40" fill="none">
+          <path d="M10 14L20 22L30 14" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <rect x="8" y="12" width="24" height="16" rx="3" stroke="white" stroke-width="2"/>
+        </svg>
+      </span>
+      GoMail
+    </a>
+    <nav class="header-nav">
+      <a href="#features" class="header-link">Features</a>
+      <a href="#how-it-works" class="header-link">How It Works</a>
+      <a href="#pricing" class="header-link">Pricing</a>
+    </nav>
+    <div class="header-cta">
+      <a href="/app/login.html" class="btn btn-primary">Sign In</a>
+    </div>
+  </div>
+</header>
+
+<!-- Hero -->
+<section class="hero">
+  <div class="container">
+    <div class="hero-badge">
+      <span class="hero-badge-dot"></span>
+      Open Source &amp; Self-Hosted
+    </div>
+    <h1 class="neon-text">Your Email Infrastructure, Your Rules</h1>
+    <p>
+      GoMail is a batteries-included, self-hosted email platform. Run your own inbound email service with custom domains, SMTP relay, API access, real-time push notifications, and static website hosting — all from a single binary.
+    </p>
+    <div class="hero-actions">
+      <a href="/app/" class="btn btn-primary btn-lg">Get Started Free</a>
+      <a href="#features" class="btn btn-outline btn-lg">Learn More</a>
+    </div>
+  </div>
+</section>
+
+<!-- Features -->
+<section class="features-section" id="features">
+  <div class="container section">
+    <div class="section-header">
+      <h2 class="neon-text-sub">Everything You Need for Email</h2>
+      <p>A complete self-hosted email platform — from receiving mail to sending via SMTP relay, hosting landing pages, and managing everything through a clean admin panel.</p>
+    </div>
+    <div class="features-grid">
+
+      <!-- Inbound Email -->
+      <div class="feature-card">
+        <div class="feature-icon mail">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
+            <polyline points="22,6 12,13 2,6"/>
+          </svg>
+        </div>
+        <h3>📧 Inbound Email</h3>
+        <p>
+          Receive emails on your custom domains with catch-all mailboxes. Full MIME parsing with attachment support, HTML sanitization, email threading with reply tracking, and real-time inbox delivery.
+        </p>
+      </div>
+
+      <!-- SMTP Relay -->
+      <div class="feature-card">
+        <div class="feature-icon smtp">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+          </svg>
+        </div>
+        <h3>📤 SMTP Relay &amp; Submission</h3>
+        <p>
+          Send emails via SMTP AUTH on ports 587 (STARTTLS) and 465 (implicit TLS). Use API keys as SMTP credentials, automatic DKIM signing for every outbound message, direct MX delivery or upstream relay, with configurable daily send limits.
+        </p>
+      </div>
+
+      <!-- Static Websites -->
+      <div class="feature-card">
+        <div class="feature-icon site">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
+          </svg>
+        </div>
+        <h3>🌐 Static Website Hosting</h3>
+        <p>
+          Upload ZIP archives and publish instantly to a subdomain. Bind custom domains with automatic Let's Encrypt SSL via Traefik. Atomic staging-to-live publishing with rollback, ZIP bomb protection, and thumbnail generation.
+        </p>
+      </div>
+
+      <!-- API Keys -->
+      <div class="feature-card">
+        <div class="feature-icon api">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M15 7h.01"/><path d="M10.5 12.5L8 15l-2-2-3 3 2 2 3-3 2 2 2.5-2.5"/>
+            <path d="M16 3a5 5 0 0 1 3.54 8.54l-7 7A5 5 0 0 1 5.46 11.46l7-7A5 5 0 0 1 16 3Z"/>
+          </svg>
+        </div>
+        <h3>🔑 API Access</h3>
+        <p>
+          Manage API keys with scoped permissions (<code>send_email</code>, <code>full_access</code>). Keys are SHA-256 hashed at rest and revealed only once upon creation. Use them for SMTP auth or REST API calls with rate limiting and usage counters.
+        </p>
+      </div>
+
+      <!-- Realtime -->
+      <div class="feature-card">
+        <div class="feature-icon realtime">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+          </svg>
+        </div>
+        <h3>⚡ Real-time Updates</h3>
+        <p>
+          Server-Sent Events (SSE) push new email notifications to your browser instantly via Redis pub/sub. No polling needed — new mail appears in your inbox the moment it arrives, with query-token auth for secure EventSource connections.
+        </p>
+      </div>
+
+      <!-- Admin Panel -->
+      <div class="feature-card">
+        <div class="feature-icon admin">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
+            <path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+          </svg>
+        </div>
+        <h3>🛡️ Admin Panel &amp; Teams</h3>
+        <p>
+          Super admin user management with per-user quotas on domains, inboxes, message size, and storage. Multi-user teams with fine-grained permissions — invite collaborators and control access across email inboxes, API keys, and websites.
+        </p>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- How It Works -->
+<section class="section" id="how-it-works">
+  <div class="container">
+    <div class="section-header" style="text-align:center;margin-bottom:48px">
+      <h2 class="neon-text-sub">How It Works</h2>
+      <p style="max-width:560px;margin:12px auto 0">Get your email infrastructure running in minutes with three simple steps.</p>
+    </div>
+    <div class="steps">
+      <div class="step">
+        <div class="step-number">1</div>
+        <h3>Deploy</h3>
+        <p>Run a single install script on your Ubuntu/Debian VPS. Docker, PostgreSQL, Redis, nginx, TLS — all provisioned automatically.</p>
+      </div>
+      <div class="step">
+        <div class="step-number">2</div>
+        <h3>Configure DNS</h3>
+        <p>Point your domain's MX record to GoMail. Add SPF, DKIM, and DMARC records for maximum deliverability — our panel guides you step by step.</p>
+      </div>
+      <div class="step">
+        <div class="step-number">3</div>
+        <h3>Start Receiving</h3>
+        <p>Create inboxes, generate API keys, upload static sites — everything works immediately. Monitor real-time email flow from the dashboard.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Stats -->
+<section class="stats">
+  <div class="container">
+    <div class="stats-grid">
+      <div>
+        <div class="stat-number">Go 1.26+</div>
+        <div class="stat-label">Single Binary • Zero Dependencies at Runtime</div>
+      </div>
+      <div>
+        <div class="stat-number">PostgreSQL + Redis</div>
+        <div class="stat-label">Battle-Tested Data Layer</div>
+      </div>
+      <div>
+        <div class="stat-number">Docker Ready</div>
+        <div class="stat-label">Deploy Anywhere with Docker Compose</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Use Cases -->
+<section class="section">
+  <div class="container">
+    <div class="section-header" style="text-align:center;margin-bottom:48px">
+      <h2 class="neon-text-sub">Who Is GoMail For?</h2>
+      <p style="max-width:560px;margin:12px auto 0">Built for developers, agencies, and businesses who want full control over their email infrastructure.</p>
+    </div>
+    <div class="features-grid">
+      <div class="feature-card">
+        <h3>🖥️ Developers &amp; SaaS Builders</h3>
+        <p>Add email receiving to your application via REST API or SMTP. Programmatic inbox creation, webhook-ready real-time events, and scoped API keys for multi-tenant architectures.</p>
+      </div>
+      <div class="feature-card">
+        <h3>🏢 Agencies &amp; Freelancers</h3>
+        <p>Host static websites for clients with custom domains and automatic SSL. Manage multiple projects from one dashboard. Deploy with a simple ZIP upload — no Git, no CI/CD needed.</p>
+      </div>
+      <div class="feature-card">
+        <h3>🔒 Privacy-Focused Teams</h3>
+        <p>Keep your email data on your own infrastructure. No third-party email providers reading your messages. End-to-end control with JWT auth, bcrypt password hashing, and session chain revocation.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<section class="section cta" id="pricing">
+  <div class="container">
+    <h2 class="neon-text-sub">Self-Hosted. Free Forever.</h2>
+    <p>
+      GoMail is open source under the MIT license. No monthly fees, no vendor lock-in, no usage limits. Run it on your own server and keep complete control of your data.
+    </p>
+    <div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap">
+      <a href="/app/" class="btn btn-primary btn-lg">Launch App</a>
+      <a href="https://github.com" class="btn btn-outline btn-lg" target="_blank" rel="noopener">View on GitHub</a>
+    </div>
+  </div>
+</section>
+
+<!-- Footer -->
+<footer class="footer">
+  <div class="container">
+    <p>GoMail — Self-hosted email SaaS. MIT Licensed. Built with Go, PostgreSQL &amp; Redis.</p>
+    <p style="margin-top:8px">
+      <a href="/app/" style="color:var(--c-primary);text-decoration:none;font-weight:500">Open App</a>
+      &nbsp;·&nbsp;
+      <a href="/app/login.html" style="color:var(--c-text3);text-decoration:none">Sign In</a>
+    </p>
+  </div>
+</footer>
+
+</body>
 </html>

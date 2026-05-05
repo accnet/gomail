@@ -51,6 +51,7 @@ async function loadInvitePreview() {
       els.loggedInSection.classList.remove("hidden");
     } else {
       els.guestSection.classList.remove("hidden");
+      $("register-password").focus();
     }
   } catch (err) {
     els.inviteInfo.innerHTML = '<p class="error">Failed to load invite. Please try again.</p>';
@@ -125,6 +126,7 @@ $("register-btn").addEventListener("click", async () => {
   const name = $("register-name").value.trim();
   const email = $("register-email").value.trim();
   const password = $("register-password").value;
+  const confirmPassword = $("register-password-confirm").value;
   const errEl = $("register-error");
   errEl.classList.add("hidden");
 
@@ -133,8 +135,8 @@ $("register-btn").addEventListener("click", async () => {
     errEl.classList.remove("hidden");
     return;
   }
-  if (!name) {
-    errEl.textContent = "Name is required";
+  if (password !== confirmPassword) {
+    errEl.textContent = "Passwords do not match";
     errEl.classList.remove("hidden");
     return;
   }

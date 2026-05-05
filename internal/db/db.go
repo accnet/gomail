@@ -117,6 +117,7 @@ func ensureTeamsSchema(database *gorm.DB) error {
 		"CREATE INDEX IF NOT EXISTS idx_static_projects_team ON static_projects(team_id) WHERE deleted_at IS NULL AND team_id IS NOT NULL",
 		"CREATE INDEX IF NOT EXISTS idx_sent_email_logs_team ON sent_email_logs(team_id) WHERE team_id IS NOT NULL",
 		"CREATE INDEX IF NOT EXISTS idx_teams_default_owner ON teams(owner_id) WHERE deleted_at IS NULL AND is_default = true",
+		"UPDATE users SET can_create_workspaces = true WHERE can_create_workspaces IS NULL",
 		"UPDATE team_members SET joined_at = created_at WHERE joined_at < '1970-01-01'",
 	}
 	for _, stmt := range statements {
@@ -335,6 +336,7 @@ func SeedSuperAdmin(ctx context.Context, database *gorm.DB, cfg config.Config) e
 		IsAdmin:             true,
 		IsSuperAdmin:        true,
 		IsActive:            true,
+		CanCreateWorkspaces: true,
 		MaxDomains:          cfg.DefaultAdminMaxDomains,
 		MaxInboxes:          cfg.DefaultAdminMaxInboxes,
 		MaxMembers:          cfg.DefaultAdminMaxMembers,

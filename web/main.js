@@ -171,9 +171,45 @@ function setView(view) {
   els.sidebar.classList.remove("open");
 }
 
+const viewScopeRules = {
+  email: ["email:access", "email:manage"],
+  domains: ["domain:manage"],
+  websites: ["website:read", "website:deploy", "website:manage"],
+  "api-keys": ["apikey:read", "apikey:create", "apikey:manage"],
+  members: ["member:manage"],
+};
+
 function normalizeView(view) {
   const base = view.split("/")[0];
   return viewMeta[base] ? view : (viewMeta[view] ? view : defaultView);
+}
+
+function isViewAllowed(view) {
+  const base = normalizeView(view).split("/")[0];
+  if (base === "users") return Boolean(currentUser?.is_super_admin);
+  if (base === "workspace" || base === "teams") return canCreateWorkspaces();
+  if (base === "settings") return true;
+  const workspace = activeWorkspace();
+  if (!workspace) return true;
+  if (workspace.role === "owner") return true;
+  if (base === "dashboard") return false;
+  const required = viewScopeRules[base];
+  if (!required) return false;
+  return required.some((scope) => workspaceHasScope(workspace, scope));
+}
+
+function firstAllowedView() {
+  const ordered = ["email", "domains", "websites", "api-keys", "members", "settings"];
+  return ordered.find((view) => isViewAllowed(view)) || "settings";
+}
+
+function updateNavVisibility() {
+  document.querySelectorAll("[data-view]").forEach((button) => {
+    const view = button.dataset.view;
+    const workspace = activeWorkspace();
+    const accountOnly = view === "settings" && workspace && workspace.role !== "owner";
+    button.classList.toggle("hidden", accountOnly || !isViewAllowed(view));
+  });
 }
 
 function viewFromURL() {
@@ -196,6 +232,10 @@ function setViewURL(view, replace = false) {
 async function renderView(view, options = {}) {
   const nextView = normalizeView(view);
   const base = nextView.split("/")[0];
+  if (!isViewAllowed(nextView)) {
+    await renderView(firstAllowedView(), { ...options, replaceURL: true });
+    return;
+  }
   if (options.updateURL !== false) {
     const changed = setViewURL(nextView, options.replaceURL);
     if (changed && !options.replaceURL) return;
@@ -455,12 +495,17 @@ async function bootstrapSession() {
   }
   try {
     currentUser = await api("/me", { team: false });
-    updateAccountUI();
-    await initTeamSwitcher();
-    connectEvents();
-    await renderView(viewFromURL(), { updateURL: true, replaceURL: !window.location.hash });
   } catch (_) {
     logout();
+    return;
+  }
+  updateAccountUI();
+  await initTeamSwitcher();
+  connectEvents();
+  try {
+    await renderView(viewFromURL(), { updateURL: true, replaceURL: !window.location.hash });
+  } catch (_) {
+    await renderView(firstAllowedView(), { updateURL: true, replaceURL: true });
   }
 }
 
@@ -487,8 +532,10 @@ async function initTeamSwitcher() {
       localStorage.setItem("active_team_id", userTeams[0].id);
     }
     renderTeamSwitcher();
+    updateNavVisibility();
   } catch {
     localStorage.removeItem("active_team_id");
+    updateNavVisibility();
     // Workspaces may not be available yet, hide switcher
   }
 }
@@ -503,6 +550,7 @@ function renderTeamSwitcher() {
     return;
   }
   switcher.classList.remove("hidden");
+  document.getElementById("team-switcher-create")?.classList.toggle("hidden", !canCreateWorkspaces());
 
   const activeTeamID = localStorage.getItem("active_team_id") || "";
   const activeTeam = userTeams.find(t => t.id === activeTeamID);
@@ -535,6 +583,7 @@ function selectTeam(teamID) {
     localStorage.removeItem("active_team_id");
   }
   renderTeamSwitcher();
+  updateNavVisibility();
   document.getElementById("team-switcher-dropdown").classList.add("hidden");
   // Reload current view
   renderView(currentView, { updateURL: false });
@@ -554,9 +603,56 @@ function parseScopes(permissions) {
   } catch { return []; }
 }
 
+function workspaceHasScope(workspace, scope) {
+  if (!workspace) return false;
+  if (workspace.role === "owner") return true;
+  return parseScopes(workspace.permissions).includes(scope);
+}
+
+function activeWorkspaceHasScope(scope) {
+  const workspace = activeWorkspace();
+  if (!workspace) return true;
+  return workspaceHasScope(workspace, scope);
+}
+
 function activeWorkspace() {
   const activeTeamID = localStorage.getItem("active_team_id") || "";
   return userTeams.find(t => t.id === activeTeamID) || userTeams[0] || null;
+}
+
+function canCreateWorkspaces() {
+  return currentUser?.can_create_workspaces !== false;
+}
+
+function wireActionDots(container = document) {
+  container.querySelectorAll(".action-dots-trigger").forEach(trigger => {
+    trigger.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const dots = trigger.closest(".action-dots");
+      const menu = dots?.querySelector(".action-dots-menu");
+      if (!menu) return;
+
+      container.querySelectorAll(".action-dots-menu").forEach(m => { if (m !== menu) m.classList.add("hidden"); });
+
+      const isOpening = menu.classList.contains("hidden");
+      if (!isOpening) {
+        menu.classList.add("hidden");
+        return;
+      }
+
+      menu.classList.remove("hidden");
+      const rect = trigger.getBoundingClientRect();
+      const menuWidth = menu.offsetWidth || 180;
+      const menuHeight = menu.offsetHeight || 96;
+      let left = rect.right - menuWidth;
+      let top = rect.bottom + 6;
+      if (left < 8) left = 8;
+      if (left + menuWidth > window.innerWidth - 8) left = window.innerWidth - menuWidth - 8;
+      if (top + menuHeight > window.innerHeight - 8) top = rect.top - menuHeight - 6;
+      menu.style.left = `${left}px`;
+      menu.style.top = `${Math.max(8, top)}px`;
+    });
+  });
 }
 
 // Workspace switcher dropdown toggle
@@ -571,10 +667,15 @@ document.addEventListener("click", (e) => {
   }
 });
 
+document.addEventListener("click", () => {
+  document.querySelectorAll(".action-dots-menu:not(.hidden)").forEach(menu => menu.classList.add("hidden"));
+});
+
 // Create workspace from switcher
 const createTeamBtn = document.getElementById("team-switcher-create");
 if (createTeamBtn) {
   createTeamBtn.addEventListener("click", () => {
+    if (!canCreateWorkspaces()) return;
     showCreateTeamModal();
     // Close the dropdown
     const dropdown = document.getElementById("team-switcher-dropdown");
@@ -615,11 +716,11 @@ async function renderTeams() {
             </div>
             <p class="teams-empty-title">No workspace yet</p>
             <p class="teams-empty-desc">Workspaces let you collaborate with others by sharing domains, API keys, and websites.</p>
-            <button id="teams-create-btn-empty" class="btn btn-primary">+ Create Workspace</button>
+            ${canCreateWorkspaces() ? `<button id="teams-create-btn-empty" class="btn btn-primary">+ Create Workspace</button>` : ""}
           </div>
         </div>
       `;
-      document.getElementById("teams-create-btn-empty").addEventListener("click", () => showCreateTeamModal());
+      document.getElementById("teams-create-btn-empty")?.addEventListener("click", () => showCreateTeamModal());
       return;
     }
 
@@ -732,6 +833,10 @@ async function renderTeams() {
 
 // ── Create Workspace Modal ────────────────────────────────────────────────
 function showCreateTeamModal() {
+  if (!canCreateWorkspaces()) {
+    alert("Workspace creation is not allowed for this account.");
+    return;
+  }
   openModal("Create Workspace", `
     <div class="modal-field">
       <label>Workspace Name</label>
@@ -776,15 +881,15 @@ async function renderMembers() {
         <div class="teams-empty">
           <p class="teams-empty-title">No workspace available</p>
           <p class="teams-empty-desc">Create a workspace before adding members.</p>
-          <button id="members-create-workspace" class="btn btn-primary">+ Create Workspace</button>
+          ${canCreateWorkspaces() ? `<button id="members-create-workspace" class="btn btn-primary">+ Create Workspace</button>` : ""}
         </div>
       </div>
     `;
-    document.getElementById("members-create-workspace").addEventListener("click", () => showCreateTeamModal());
+    document.getElementById("members-create-workspace")?.addEventListener("click", () => showCreateTeamModal());
     return;
   }
 
-  const canInvite = workspace.role === "owner" || workspace.role === "admin";
+  const canInvite = workspaceHasScope(workspace, "member:manage");
   content.innerHTML = `
     <div class="team-detail">
       <div class="team-detail-header">
@@ -834,7 +939,7 @@ async function renderMembers() {
 function renderTeamManage(teamID, team) {
   const content = document.getElementById("page-content");
   const isOwner = team.role === 'owner';
-  const isAdmin = team.role === 'owner' || team.role === 'admin';
+  const isAdmin = workspaceHasScope(team, "member:manage");
 
   content.innerHTML = `
     <div class="team-detail">
@@ -919,7 +1024,7 @@ function renderTeamManage(teamID, team) {
 // ── Load Team Members ──────────────────────────────────────────────────────
 async function loadTeamMembers(teamID, team, refresh = () => renderTeamManage(teamID, team)) {
   const container = document.getElementById("team-members-section");
-  const isAdmin = team.role === 'owner' || team.role === 'admin';
+  const canManageMembers = workspaceHasScope(team, "member:manage");
 
   try {
     const members = await api(`/teams/${teamID}/members`);
@@ -946,25 +1051,34 @@ async function loadTeamMembers(teamID, team, refresh = () => renderTeamManage(te
               : scopes.map(s => `<span class="scope-tag">${escHtml(s)}</span>`).join('')}
           </div>
           ` : '<span style="font-size:12px;color:var(--color-text-tertiary)">Full access</span>'}
-          ${isAdmin && m.role !== 'owner' ? `
+          ${canManageMembers && m.role !== 'owner' ? `
           <div class="member-actions">
-            <button class="btn btn-secondary btn-xs edit-member-btn" data-user="${m.user_id}" data-role="${m.role}" data-scopes="${escHtml(JSON.stringify(scopes))}">Edit</button>
-            <button class="btn btn-danger btn-xs remove-member-btn" data-user="${m.user_id}" data-name="${escHtml(m.user_name || m.user_email)}">Remove</button>
+            <div class="action-dots">
+              <button class="action-dots-trigger icon-btn" title="Actions" style="width:28px;height:28px">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg>              </button>
+              <div class="action-dots-menu hidden">
+                <button class="action-dots-item edit-member-btn" data-user="${m.user_id}" data-role="${m.role}" data-scopes="${encodeURIComponent(JSON.stringify(scopes))}">Edit Permissions</button>
+                <button class="action-dots-item action-dots-danger remove-member-btn" data-user="${m.user_id}" data-name="${escHtml(m.user_name || m.user_email)}">Remove Member</button>
+              </div>
+            </div>
           </div>
           ` : ''}
         </div>
       `;
     }).join("");
 
-    // Wire actions
+    wireActionDots(container);
+
     container.querySelectorAll(".edit-member-btn").forEach(btn => {
       btn.addEventListener("click", () => {
-        const scopes = btn.dataset.scopes ? JSON.parse(btn.dataset.scopes) : [];
-        showEditMemberModal(teamID, team, btn.dataset.user, btn.dataset.role, scopes);
+        btn.closest(".action-dots-menu")?.classList.add("hidden");
+        const scopes = btn.dataset.scopes ? JSON.parse(decodeURIComponent(btn.dataset.scopes)) : [];
+        showEditMemberModal(teamID, team, btn.dataset.user, btn.dataset.role, scopes, refresh);
       });
     });
     container.querySelectorAll(".remove-member-btn").forEach(btn => {
       btn.addEventListener("click", () => {
+        btn.closest(".action-dots-menu")?.classList.add("hidden");
         showConfirmModal(
           "Remove Member",
           `Are you sure you want to remove <strong>${escHtml(btn.dataset.name)}</strong> from the workspace?`,
@@ -1011,7 +1125,7 @@ async function loadTeamInvites(teamID, team, refresh = () => renderTeamManage(te
           <div class="invite-actions">
             <div class="action-dots">
               <button class="action-dots-trigger icon-btn" title="Actions" style="width:28px;height:28px">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg>
               </button>
               <div class="action-dots-menu hidden">
                 ${inviteLink ? `<button class="action-dots-item copy-invite-link-btn" data-link="${escHtml(inviteLink)}">Copy Invite Link</button>` : ''}
@@ -1244,29 +1358,10 @@ function showInviteModal(teamID, team, refresh = () => renderTeamManage(teamID, 
   }
 }
 
-function showEditMemberModal(teamID, team, userID, currentRole, currentScopes) {
+function showEditMemberModal(teamID, team, userID, currentRole, currentScopes, refresh = () => renderTeamManage(teamID, team)) {
   const scopeOptions = ["email:access", "email:manage", "apikey:read", "apikey:create", "apikey:manage", "website:read", "website:deploy", "website:manage", "domain:manage", "member:manage"];
 
   openModal("Edit Member", `
-    <div class="modal-field">
-      <label>Role</label>
-      <div class="role-selector">
-        <div class="role-option ${currentRole === 'member' ? 'selected' : ''}" data-role="member">
-          <div class="role-option-radio"></div>
-          <div>
-            <div style="font-weight:600">Member</div>
-            <div style="font-size:11px;color:var(--color-text-tertiary)">Scoped access</div>
-          </div>
-        </div>
-        <div class="role-option ${currentRole === 'admin' ? 'selected' : ''}" data-role="admin">
-          <div class="role-option-radio"></div>
-          <div>
-            <div style="font-weight:600">Admin</div>
-            <div style="font-size:11px;color:var(--color-text-tertiary)">Full management</div>
-          </div>
-        </div>
-      </div>
-    </div>
     <div class="modal-field">
       <label>Permission Scopes</label>
       <div class="scope-list">
@@ -1285,16 +1380,7 @@ function showEditMemberModal(teamID, team, userID, currentRole, currentScopes) {
     </div>
   `);
 
-  let selectedRole = currentRole;
   const selectedScopes = new Set(currentScopes);
-
-  document.querySelectorAll(".role-option").forEach(opt => {
-    opt.addEventListener("click", () => {
-      document.querySelectorAll(".role-option").forEach(o => o.classList.remove("selected"));
-      opt.classList.add("selected");
-      selectedRole = opt.dataset.role;
-    });
-  });
 
   document.querySelectorAll(".scope-item").forEach(item => {
     item.addEventListener("click", () => {
@@ -1315,10 +1401,10 @@ function showEditMemberModal(teamID, team, userID, currentRole, currentScopes) {
     const scopes = [...selectedScopes];
     api(`/teams/${teamID}/members/${userID}`, {
       method: "PATCH",
-      body: JSON.stringify({ role: selectedRole, scopes }),
+      body: JSON.stringify({ scopes }),
     }).then(() => {
       closeModal();
-      renderTeamManage(teamID, team);
+      refresh();
     }).catch(err => {
       alert(err.message);
       btn.disabled = false;
@@ -1473,6 +1559,7 @@ document.querySelectorAll("[data-view]").forEach((button) => {
 const sidebarCreateTeamBtn = document.getElementById("sidebar-create-team");
 if (sidebarCreateTeamBtn) {
   sidebarCreateTeamBtn.addEventListener("click", () => {
+    if (!canCreateWorkspaces()) return;
     showCreateTeamModal();
   });
 }
@@ -2183,10 +2270,11 @@ async function renderEmail() {
   });
   if (state.emailUnreadOnly) query.set("unread", "true");
   if (state.selectedInboxID) query.set("inbox_id", state.selectedInboxID);
+  const canReadDomains = activeWorkspaceHasScope("domain:manage");
   const [inboxes, conversationsPayload, domains, outbound] = await Promise.all([
     api("/inboxes"),
     api(`/conversations?${query.toString()}`),
-    api("/domains"),
+    canReadDomains ? api("/domains") : Promise.resolve([]),
     api("/outbound/status").catch(() => ({ configured: false }))
   ]);
   state.inboxes = inboxes;

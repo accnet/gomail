@@ -22,10 +22,11 @@ func TestEnsureDefaultWorkspaceMigratesPersonalResources(t *testing.T) {
 	}
 
 	user := db.User{
-		Email:        "legacy@test.local",
-		Name:         "Legacy",
-		PasswordHash: "hash",
-		IsActive:     true,
+		Email:               "legacy@test.local",
+		Name:                "Legacy",
+		PasswordHash:        "hash",
+		IsActive:            true,
+		CanCreateWorkspaces: true,
 	}
 	if err := database.Create(&user).Error; err != nil {
 		t.Fatal(err)
@@ -95,10 +96,11 @@ func TestInviteMemberRespectsOwnerMemberQuota(t *testing.T) {
 	}
 
 	owner := db.User{
-		Email:        "owner@test.local",
-		PasswordHash: "hash",
-		IsActive:     true,
-		MaxMembers:   0,
+		Email:               "owner@test.local",
+		PasswordHash:        "hash",
+		IsActive:            true,
+		CanCreateWorkspaces: true,
+		MaxMembers:          0,
 	}
 	if err := database.Create(&owner).Error; err != nil {
 		t.Fatal(err)
@@ -114,6 +116,71 @@ func TestInviteMemberRespectsOwnerMemberQuota(t *testing.T) {
 	_, err = NewService(database).InviteMember(context.Background(), owner.ID, team.ID, "member@test.local", db.TeamRoleMember, nil)
 	if !errors.Is(err, ErrMemberQuotaExceeded) {
 		t.Fatalf("InviteMember error = %v, want %v", err, ErrMemberQuotaExceeded)
+	}
+}
+
+func TestListTeamsHidesOwnedWorkspaceForInvitee(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(database); err != nil {
+		t.Fatal(err)
+	}
+
+	invitee := db.User{
+		Email:               "invitee@test.local",
+		PasswordHash:        "hash",
+		IsActive:            true,
+		CanCreateWorkspaces: true,
+	}
+	owner := db.User{
+		Email:               "owner2@test.local",
+		PasswordHash:        "hash",
+		IsActive:            true,
+		CanCreateWorkspaces: true,
+	}
+	if err := database.Create(&invitee).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Create(&owner).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	svc := NewService(database)
+	owned, err := svc.CreateTeam(context.Background(), invitee.ID, "Invitee Workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Model(owned).Update("is_default", true).Error; err != nil {
+		t.Fatal(err)
+	}
+	shared, err := svc.CreateTeam(context.Background(), owner.ID, "Shared Workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Create(&db.TeamMember{
+		TeamID:      shared.ID,
+		UserID:      invitee.ID,
+		Role:        db.TeamRoleMember,
+		Permissions: MarshalScopes([]string{ScopeEmailAccess}),
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	teams, err := svc.ListTeams(context.Background(), invitee.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(teams) != 1 || teams[0].ID != shared.ID {
+		t.Fatalf("ListTeams = %#v, want only shared workspace", teams)
+	}
+	var reloaded db.User
+	if err := database.First(&reloaded, "id = ?", invitee.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.CanCreateWorkspaces {
+		t.Fatal("invitee should be reconciled to can_create_workspaces=false")
 	}
 }
 

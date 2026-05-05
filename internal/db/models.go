@@ -81,6 +81,7 @@ type User struct {
 	IsAdmin             bool           `gorm:"not null;default:false" json:"is_admin"`
 	IsSuperAdmin        bool           `gorm:"not null;default:false" json:"is_super_admin"`
 	IsActive            bool           `gorm:"not null;default:false" json:"is_active"`
+	CanCreateWorkspaces bool           `gorm:"not null;default:true" json:"can_create_workspaces"`
 	MaxDomains          int            `gorm:"not null;default:5" json:"max_domains"`
 	MaxInboxes          int            `gorm:"not null;default:50" json:"max_inboxes"`
 	MaxMembers          int            `gorm:"not null;default:5" json:"max_members"`

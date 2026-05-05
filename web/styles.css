@@ -2724,7 +2724,7 @@ input[readonly] {
 /* ── Team Switcher (sidebar) ─────────────────────────────────────────────── */
 .team-switcher {
   position: relative;
-  margin: 0 8px 20px;
+  margin: 0 8px 10px;
 }
 
 .team-switcher-trigger {
@@ -3834,10 +3834,8 @@ input[readonly] {
 }
 
 .invite-info {
-  background: var(--color-surface-hover);
   padding: 16px;
-  border-radius: var(--radius-md);
-  margin-bottom: 20px;
+  margin-bottom: 0px;
 }
 
 .tabs {

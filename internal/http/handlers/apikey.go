@@ -68,14 +68,14 @@ func RegisterApiKeyRoutes(r gin.IRouter, database *gorm.DB, authMiddleware gin.H
 	api := r.Group("/api-keys")
 	api.Use(authMiddleware)
 	settings := smtpSettingsFromConfig(smtpAuthHostname, smtpAuthPort, smtpAuthTLSPort)
-	api.POST("", createApiKey(database, settings))
-	api.GET("", listApiKeys(database, settings))
-	api.GET("/settings", getApiKeySettings(settings))
-	api.GET("/:id", getApiKey(database, settings))
-	api.PATCH("/:id", patchApiKey(database, settings))
-	api.POST("/:id/revoke", revokeApiKey(database, settings))
-	api.DELETE("/:id", deleteApiKey(database, settings))
-	api.GET("/:id/usage", usageApiKey(database))
+	api.POST("", mw.RequireTeamScope(teams.ScopeApiKeyCreate), createApiKey(database, settings))
+	api.GET("", mw.RequireTeamScope(teams.ScopeApiKeyRead), listApiKeys(database, settings))
+	api.GET("/settings", mw.RequireTeamScope(teams.ScopeApiKeyRead), getApiKeySettings(settings))
+	api.GET("/:id", mw.RequireTeamScope(teams.ScopeApiKeyRead), getApiKey(database, settings))
+	api.PATCH("/:id", mw.RequireTeamScope(teams.ScopeApiKeyManage), patchApiKey(database, settings))
+	api.POST("/:id/revoke", mw.RequireTeamScope(teams.ScopeApiKeyManage), revokeApiKey(database, settings))
+	api.DELETE("/:id", mw.RequireTeamScope(teams.ScopeApiKeyManage), deleteApiKey(database, settings))
+	api.GET("/:id/usage", mw.RequireTeamScope(teams.ScopeApiKeyRead), usageApiKey(database))
 }
 
 func createApiKey(database *gorm.DB, s smtpSettings) gin.HandlerFunc {
