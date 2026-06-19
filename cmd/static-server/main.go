@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -16,6 +17,88 @@ import (
 	"gomail/internal/db"
 	"gomail/internal/staticprojects"
 )
+
+// projectCache provides LRU-style caching for resolved projects
+type projectCache struct {
+	mu      sync.RWMutex
+	items   map[string]*cacheItem
+	maxSize int
+}
+
+type cacheItem struct {
+	project  *staticprojects.ResolvedProject
+	expiry   time.Time
+	lastUsed time.Time
+}
+
+func newProjectCache(maxSize int, ttl time.Duration) *projectCache {
+	cache := &projectCache{
+		items:   make(map[string]*cacheItem),
+		maxSize: maxSize,
+	}
+	// Start background cleanup goroutine
+	go cache.cleanup(ttl)
+	return cache
+}
+
+func (c *projectCache) get(key string) (*staticprojects.ResolvedProject, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	item, ok := c.items[key]
+	if !ok {
+		return nil, false
+	}
+	if time.Now().After(item.expiry) {
+		return nil, false
+	}
+	item.lastUsed = time.Now()
+	return item.project, true
+}
+
+func (c *projectCache) set(key string, project *staticprojects.ResolvedProject, ttl time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	
+	// Evict oldest if at capacity
+	if len(c.items) >= c.maxSize {
+		c.evictOldest()
+	}
+	
+	c.items[key] = &cacheItem{
+		project:  project,
+		expiry:   time.Now().Add(ttl),
+		lastUsed: time.Now(),
+	}
+}
+
+func (c *projectCache) evictOldest() {
+	var oldestKey string
+	var oldestTime time.Time
+	for k, v := range c.items {
+		if oldestKey == "" || v.lastUsed.Before(oldestTime) {
+			oldestKey = k
+			oldestTime = v.lastUsed
+		}
+	}
+	if oldestKey != "" {
+		delete(c.items, oldestKey)
+	}
+}
+
+func (c *projectCache) cleanup(ttl time.Duration) {
+	ticker := time.NewTicker(ttl / 2)
+	defer ticker.Stop()
+	for range ticker.C {
+		c.mu.Lock()
+		now := time.Now()
+		for k, v := range c.items {
+			if now.After(v.expiry) {
+				delete(c.items, k)
+			}
+		}
+		c.mu.Unlock()
+	}
+}
 
 func main() {
 	cfg, err := config.Load()
@@ -29,6 +112,9 @@ func main() {
 	}
 
 	resolver := staticprojects.NewHostResolver(database, cfg.StaticSitesBaseDomain, cfg.SaaSDomain)
+	
+	// Initialize project cache with 1000 entries and 5-minute TTL
+	cache := newProjectCache(1000, 5*time.Minute)
 
 	mux := http.NewServeMux()
 
@@ -51,8 +137,27 @@ func main() {
 			return
 		}
 
-		project, err := resolver.Resolve(host)
-		if err != nil || project == nil {
+		// Normalize host for cache key
+		cacheKey := host
+		if idx := strings.LastIndex(host, ":"); idx >= 0 {
+			cacheKey = host[:idx]
+		}
+
+		// Try cache first
+		project, cached := cache.get(cacheKey)
+		if !cached {
+			// Resolve from database
+			var resolveErr error
+			project, resolveErr = resolver.Resolve(host)
+			if resolveErr != nil {
+				http.NotFound(w, r)
+				return
+			}
+			// Cache result (even nil for negative caching)
+			cache.set(cacheKey, project, 5*time.Minute)
+		}
+
+		if project == nil {
 			http.NotFound(w, r)
 			return
 		}
@@ -202,6 +307,8 @@ func main() {
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
+		// Add ReadHeaderTimeout to prevent Slowloris attacks
+		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	go func() {
